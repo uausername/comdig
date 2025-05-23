@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Миграция для добавления поля rank в таблицу comments
+Миграция для добавления поля comment_rank в таблицу comments
 """
 
 import os
 from sqlalchemy import create_engine, text
 
 def migrate_add_rank_column():
-    """Добавляет поле rank в таблицу comments если его нет"""
+    """Добавляет поле comment_rank в таблицу comments если его нет"""
     
     # Подключение к базе данных
     db_host = os.getenv("DB_HOST", "localhost")
@@ -21,25 +21,25 @@ def migrate_add_rank_column():
     
     try:
         with engine.connect() as connection:
-            # Проверяем, существует ли уже поле rank
+            # Проверяем, существует ли уже поле comment_rank
             result = connection.execute(text("""
                 SELECT column_name 
                 FROM information_schema.columns 
-                WHERE table_name='comments' AND column_name='rank'
+                WHERE table_name='comments' AND column_name='comment_rank'
             """))
             
             if result.fetchone():
-                print("✅ Поле 'rank' уже существует в таблице 'comments'")
+                print("✅ Поле 'comment_rank' уже существует в таблице 'comments'")
                 return True
             
-            # Добавляем поле rank
+            # Добавляем поле comment_rank
             connection.execute(text("""
                 ALTER TABLE comments 
-                ADD COLUMN rank FLOAT
+                ADD COLUMN comment_rank FLOAT
             """))
             
             connection.commit()
-            print("✅ Поле 'rank' успешно добавлено в таблицу 'comments'")
+            print("✅ Поле 'comment_rank' успешно добавлено в таблицу 'comments'")
             return True
             
     except Exception as e:
@@ -48,7 +48,7 @@ def migrate_add_rank_column():
 
 def main():
     """Основная функция"""
-    print("🔄 Запуск миграции для добавления поля 'rank'...")
+    print("🔄 Запуск миграции для добавления поля 'comment_rank'...")
     success = migrate_add_rank_column()
     
     if success:

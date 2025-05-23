@@ -41,7 +41,7 @@ class Comment(Base):
     likes = Column(Integer)
     published_at = Column(DateTime)
     parent_id = Column(String, nullable=True)
-    rank = Column(Float, nullable=True)
+    comment_rank = Column(Float, nullable=True)
 
     video = relationship("Video", back_populates="comments")
 

@@ -8,7 +8,7 @@ from models import Video, Comment, get_db_session
 class CommentRanker:
     """Система ранжирования комментариев по информативности"""
     
-    def __init__(self, llm_service_url: str = "http://summarizer-llm:8080"):
+    def __init__(self, llm_service_url: str = "http://summarizer-llm:8000"):
         self.llm_service_url = llm_service_url
         self.batch_size = 5  # Размер батча для обработки
         
@@ -37,7 +37,7 @@ class CommentRanker:
             # Получаем комментарии без ранга
             comments = session.query(Comment).filter_by(
                 video_id=video_id, 
-                rank=None
+                comment_rank=None
             ).all()
             
             if not comments:
@@ -71,7 +71,7 @@ class CommentRanker:
             try:
                 rank = self._rank_single_comment(comment.text, video_summary)
                 if rank is not None:
-                    comment.rank = rank
+                    comment.comment_rank = rank
                     print(f"📊 Комментарий ID {comment.id}: ранг {rank:.3f}")
                 else:
                     print(f"⚠️ Не удалось проранжировать комментарий ID {comment.id}")
@@ -94,19 +94,14 @@ class CommentRanker:
         
         try:
             response = requests.post(
-                f"{self.llm_service_url}/completion",
-                json={
-                    "prompt": prompt,
-                    "n_predict": 50,
-                    "temperature": 0.1,
-                    "stop": ["\n", "Объяснение:", "Комментарий:"]
-                },
+                f"{self.llm_service_url}/summarize",
+                json={"text": prompt},
                 timeout=30
             )
             
             if response.status_code == 200:
                 result = response.json()
-                content = result.get("content", "").strip()
+                content = result.get("summary", "").strip()
                 
                 # Извлекаем числовую оценку из ответа
                 rank = self._extract_rank_from_response(content)
@@ -134,7 +129,7 @@ class CommentRanker:
 - 0.1-0.3: Комментарий слабо связан с содержанием
 - 0.0: Комментарий не связан с видео (спам, оффтоп, эмоции без содержания)
 
-Оценка: """
+Ответь только числом от 0.0 до 1.0: """
     
     def _extract_rank_from_response(self, response: str) -> Optional[float]:
         """Извлекает числовую оценку из ответа LLM"""
@@ -171,9 +166,9 @@ class CommentRanker:
         try:
             comments = session.query(Comment).filter(
                 Comment.video_id == video_id,
-                Comment.rank.isnot(None),
-                Comment.rank >= min_rank
-            ).order_by(Comment.rank.desc()).all()
+                Comment.comment_rank.isnot(None),
+                Comment.comment_rank >= min_rank
+            ).order_by(Comment.comment_rank.desc()).all()
             
             result = []
             for comment in comments:
@@ -182,7 +177,7 @@ class CommentRanker:
                     'author': comment.author,
                     'text': comment.text,
                     'likes': comment.likes,
-                    'rank': comment.rank,
+                    'rank': comment.comment_rank,
                     'published_at': comment.published_at.isoformat() if comment.published_at else None
                 })
             

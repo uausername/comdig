@@ -19,7 +19,7 @@ def show_video_stats():
             comments_count = session.query(Comment).filter_by(video_id=video.id).count()
             ranked_count = session.query(Comment).filter(
                 Comment.video_id == video.id,
-                Comment.rank.isnot(None)
+                Comment.comment_rank.isnot(None)
             ).count()
             
             print(f"\n🎬 Видео ID: {video.id}")
@@ -56,14 +56,14 @@ def analyze_ranking_distribution(video_id: int):
     try:
         comments = session.query(Comment).filter(
             Comment.video_id == video_id,
-            Comment.rank.isnot(None)
+            Comment.comment_rank.isnot(None)
         ).all()
         
         if not comments:
             print(f"❌ Нет проранжированных комментариев для видео {video_id}")
             return
         
-        ranks = [c.rank for c in comments]
+        ranks = [c.comment_rank for c in comments]
         
         # Статистика
         total = len(ranks)
@@ -81,12 +81,12 @@ def analyze_ranking_distribution(video_id: int):
         print(f"Низкое качество (<0.3): {low_quality} ({low_quality/total*100:.1f}%)")
         
         # Топ и худшие комментарии
-        sorted_comments = sorted(comments, key=lambda x: x.rank, reverse=True)
+        sorted_comments = sorted(comments, key=lambda x: x.comment_rank, reverse=True)
         
-        print(f"\n🥇 Лучший комментарий (ранг: {sorted_comments[0].rank:.3f}):")
+        print(f"\n🥇 Лучший комментарий (ранг: {sorted_comments[0].comment_rank:.3f}):")
         print(f"   {sorted_comments[0].text[:150]}...")
         
-        print(f"\n🥉 Худший комментарий (ранг: {sorted_comments[-1].rank:.3f}):")
+        print(f"\n🥉 Худший комментарий (ранг: {sorted_comments[-1].comment_rank:.3f}):")
         print(f"   {sorted_comments[-1].text[:150]}...")
         
     finally:
