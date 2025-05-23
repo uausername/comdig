@@ -83,19 +83,26 @@ class CommentRanker:
     def _check_llm_availability(self) -> bool:
         """Проверяет доступность LLM сервиса"""
         try:
-            response = requests.get(f"{self.llm_service_url}/health", timeout=5)
-            return response.status_code == 200
-        except:
-            try:
-                # Пробуем альтернативный endpoint
-                response = requests.post(
-                    f"{self.llm_service_url}/summarize",
-                    json={"text": "test"},
-                    timeout=5
-                )
-                return True
-            except:
+            print(f"🔍 Проверяю доступность LLM: {self.llm_service_url}")
+            # Проверяем доступность через endpoint /summarize с коротким тестовым запросом
+            response = requests.post(
+                f"{self.llm_service_url}/summarize",
+                json={"text": "test"},
+                timeout=60
+            )
+            print(f"📡 Ответ LLM: статус {response.status_code}")
+            if response.status_code == 200:
+                result = response.json()
+                print(f"📄 Содержимое ответа: {result}")
+                has_summary = result.get("summary") is not None
+                print(f"✅ LLM доступна: {has_summary}")
+                return has_summary
+            else:
+                print(f"❌ LLM недоступна: неверный статус {response.status_code}")
                 return False
+        except Exception as e:
+            print(f"❌ Ошибка при проверке LLM: {e}")
+            return False
     
     def _process_batch(self, comments: List[Comment], video_summary: str, session: Session, llm_available: bool) -> int:
         """Обрабатывает батч комментариев"""
