@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+*.egg-info/
+*.egg
+*.bak
+*.swp
+*.tmp
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# Virtualenv
+venv/
+.env/
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data/results
+comments.json
+summary.json
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.h5
+*.hdf5
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Модели (если не нужны для сборки)
+model/
+summarizer/model/
+
+# Docker
+Dockerfile*
+docker-compose*
+
+# Прочее
+*.old
+*.orig
+*.rej
+
+# Исключения (оставить requirements и исходники)
+!requirements.txt
+!*.py
+!summarizer_api.py 

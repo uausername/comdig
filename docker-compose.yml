@@ -1,0 +1,49 @@
+services:
+  comments-downloader:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      - db
+      - summarizer-llm
+    environment:
+      - VIDEO_URL=https://www.youtube.com/watch?v=88K2C3Rbq8w
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=comments
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    volumes:
+      - ./:/app
+    networks:
+      - app-net
+
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_DB: comments
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-net
+
+  summarizer-llm:
+    build: ./summarizer
+    ports:
+      - "8000:8000"
+    networks:
+      - app-net
+    volumes:
+      - ./summarizer:/app
+
+volumes:
+  postgres-data:
+
+networks:
+  app-net:
+    driver: bridge

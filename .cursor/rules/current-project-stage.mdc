@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+update the file "project_current_stage.md" on every small step, and compare it to the goals described in the "project_description.md" file.
