@@ -21,14 +21,15 @@ class Video(Base):
     __tablename__ = 'videos'
 
     id = Column(Integer, primary_key=True)
+    video_id = Column(String, unique=True, nullable=True)  # YouTube video ID
     youtube_url = Column(String, unique=True, nullable=False)
     title = Column(String)
     channel = Column(String)
     upload_date = Column(String)
     summary = Column(Text)
+    transcript = Column(Text)  # Добавляем поле transcript напрямую
 
     comments = relationship("Comment", back_populates="video")
-    transcript = relationship("Transcript", uselist=False, back_populates="video")
 
 class Comment(Base):
     __tablename__ = 'comments'
@@ -45,11 +46,4 @@ class Comment(Base):
 
     video = relationship("Video", back_populates="comments")
 
-class Transcript(Base):
-    __tablename__ = 'transcripts'
-
-    id = Column(Integer, primary_key=True)
-    video_id = Column(Integer, ForeignKey("videos.id"), nullable=False, unique=True)
-    content = Column(Text)
-
-    video = relationship("Video", back_populates="transcript") 
+# Transcript теперь является полем в Video, отдельная модель не нужна 

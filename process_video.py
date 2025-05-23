@@ -58,8 +58,43 @@ class VideoProcessor:
             # 2. Проверяем, не обработано ли уже это видео
             existing_video = self.session.query(Video).filter_by(video_id=video_id).first()
             if existing_video:
-                print(f"⚠️ Видео уже обработано (ID: {existing_video.id})")
-                print("🔄 Запускаю только ранжирование комментариев...")
+                print(f"⚠️ Видео уже существует в БД (ID: {existing_video.id})")
+                
+                # Проверяем, есть ли необходимые данные
+                has_transcript = existing_video.transcript is not None
+                has_summary = existing_video.summary is not None
+                
+                print(f"📊 Статус данных:")
+                print(f"   Транскрипт: {'✅' if has_transcript else '❌'}")
+                print(f"   Summary: {'✅' if has_summary else '❌'}")
+                
+                # Если данных нет, обрабатываем как новое видео
+                if not has_transcript or not has_summary:
+                    print("🔄 Недостающие данные - запускаю полную обработку...")
+                    
+                    # Получаем транскрипт если его нет
+                    if not has_transcript:
+                        print("\n📝 ЭТАП 2: ПОЛУЧЕНИЕ ТРАНСКРИПТА")
+                        print("-" * 40)
+                        transcript = self._get_transcript(video_id)
+                        existing_video.transcript = transcript
+                    else:
+                        transcript = existing_video.transcript
+                    
+                    # Генерируем summary если его нет
+                    if not has_summary:
+                        print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
+                        print("-" * 40)
+                        summary = self._generate_summary(transcript)
+                        existing_video.summary = summary
+                    
+                    # Сохраняем изменения
+                    self.session.commit()
+                    print("✅ Данные видео обновлены")
+                
+                # Теперь запускаем ранжирование
+                print("\n🚀 ЭТАП 5: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
+                print("-" * 40)
                 return self._rank_existing_video(existing_video.id)
             
             # 3. Загружаем комментарии
@@ -74,17 +109,11 @@ class VideoProcessor:
             print("\n📝 ЭТАП 2: ПОЛУЧЕНИЕ ТРАНСКРИПТА")
             print("-" * 40)
             transcript = self._get_transcript(video_id)
-            if not transcript:
-                print("❌ Не удалось получить транскрипт")
-                return False
             
             # 5. Генерируем summary
             print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
             print("-" * 40)
             summary = self._generate_summary(transcript)
-            if not summary:
-                print("❌ Не удалось сгенерировать summary")
-                return False
             
             # 6. Сохраняем видео в БД
             print("\n💾 ЭТАП 4: СОХРАНЕНИЕ В БАЗУ ДАННЫХ")
@@ -148,42 +177,120 @@ class VideoProcessor:
         """Получает транскрипт видео"""
         try:
             print(f"📝 Получаю транскрипт для видео {video_id}...")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en'])
-            transcript = ' '.join([item['text'] for item in transcript_list])
-            print(f"✅ Получен транскрипт длиной {len(transcript)} символов")
-            return transcript
+            
+            # Сначала пробуем получить обычные субтитры
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en'])
+                transcript = ' '.join([item['text'] for item in transcript_list])
+                print(f"✅ Получен обычный транскрипт длиной {len(transcript)} символов")
+                return transcript
+            except:
+                print("⚠️ Обычные субтитры недоступны, пробую автоматические...")
+            
+            # Если обычные не найдены, пробуем автоматически сгенерированные
+            try:
+                # Получаем список всех доступных транскриптов
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                
+                # Ищем автоматически сгенерированные субтитры
+                for transcript in transcript_list:
+                    if transcript.is_generated:
+                        print(f"🤖 Найден автоматический транскрипт на языке: {transcript.language}")
+                        transcript_data = transcript.fetch()
+                        # Исправляем обращение к атрибутам FetchedTranscriptSnippet
+                        transcript_text = ' '.join([item.text for item in transcript_data])
+                        print(f"✅ Получен автоматический транскрипт длиной {len(transcript_text)} символов")
+                        return transcript_text
+                
+                # Если автоматических нет, берем первый доступный
+                for transcript in transcript_list:
+                    print(f"📝 Использую доступный транскрипт на языке: {transcript.language}")
+                    transcript_data = transcript.fetch()
+                    # Исправляем обращение к атрибутам FetchedTranscriptSnippet
+                    transcript_text = ' '.join([item.text for item in transcript_data])
+                    print(f"✅ Получен транскрипт длиной {len(transcript_text)} символов")
+                    return transcript_text
+                    
+            except Exception as e:
+                print(f"⚠️ Ошибка получения автоматических субтитров: {e}")
+            
+            # Если ничего не найдено
+            print("⚠️ Транскрипт недоступен")
+            return "Транскрипт недоступен для данного видео"
+            
         except Exception as e:
-            print(f"❌ Ошибка получения транскрипта: {e}")
-            return None
+            print(f"⚠️ Общая ошибка получения транскрипта: {e}")
+            print("🔄 Использую fallback - пустой транскрипт")
+            return "Транскрипт недоступен для данного видео"
     
     def _generate_summary(self, transcript: str) -> str:
-        """Генерирует summary через LLM"""
+        """Генерирует summary через Gemini API"""
         try:
-            print("🤖 Генерирую summary через LLM...")
+            print("🤖 Генерирую summary через Gemini API...")
             
-            # Проверяем доступность LLM сервиса
+            # Если есть API ключ Gemini, используем его
+            if self.gemini_api_key:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=self.gemini_api_key)
+                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    
+                    # Создаем промпт для суммаризации
+                    prompt = f"""Создай краткое содержание (summary) этого видео на основе транскрипта.
+                    
+Требования:
+- Длина: 2-3 предложения
+- Язык: русский
+- Основные темы и ключевые моменты
+- Четкий и информативный стиль
+
+Транскрипт:
+{transcript[:3000]}...
+
+Summary:"""
+                    
+                    response = model.generate_content(
+                        prompt,
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.3,
+                            max_output_tokens=200,
+                            top_p=0.8
+                        )
+                    )
+                    
+                    if response and response.text:
+                        summary = response.text.strip()
+                        print(f"✅ Сгенерирован summary через Gemini длиной {len(summary)} символов")
+                        return summary
+                    
+                except Exception as e:
+                    print(f"⚠️ Ошибка Gemini API: {e}")
+            
+            # Fallback: пробуем локальную LLM
+            print("🔄 Пробую локальную LLM...")
             try:
                 response = requests.get("http://summarizer-llm:8000/", timeout=5)
-            except:
-                print("⚠️ LLM сервис недоступен, пропускаю генерацию summary")
-                return "Summary недоступен - LLM сервис не отвечает"
+                
+                response = requests.post(
+                    "http://summarizer-llm:8000/summarize",
+                    json={"text": transcript},
+                    timeout=60  # Уменьшаем таймаут
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    summary = result.get("summary", "")
+                    if summary:
+                        print(f"✅ Сгенерирован summary через локальную LLM длиной {len(summary)} символов")
+                        return summary
+            except Exception as e:
+                print(f"⚠️ Локальная LLM недоступна: {e}")
             
-            # Отправляем запрос на суммаризацию
-            response = requests.post(
-                "http://summarizer-llm:8000/summarize",
-                json={"text": transcript},
-                timeout=300
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                summary = result.get("summary", "")
-                if summary:
-                    print(f"✅ Сгенерирован summary длиной {len(summary)} символов")
-                    return summary
-            
-            print("⚠️ LLM не смог сгенерировать summary, использую fallback")
-            return f"Краткое содержание видео (первые 500 символов): {transcript[:500]}..."
+            # Финальный fallback
+            print("🔄 Использую fallback summary...")
+            fallback_summary = f"Краткое содержание видео (первые 300 символов транскрипта): {transcript[:300]}..."
+            print(f"✅ Создан fallback summary длиной {len(fallback_summary)} символов")
+            return fallback_summary
             
         except Exception as e:
             print(f"❌ Ошибка генерации summary: {e}")
@@ -197,7 +304,7 @@ class VideoProcessor:
             # Создаем запись видео
             video = Video(
                 video_id=video_id,
-                url=url,
+                youtube_url=url,
                 title=f"Video {video_id}",  # Можно улучшить, получив реальный title
                 transcript=transcript,
                 summary=summary
@@ -212,11 +319,22 @@ class VideoProcessor:
             print(f"💬 Сохраняю {len(comments_data)} комментариев...")
             
             for comment_data in comments_data:
+                # Обрабатываем разные форматы данных комментариев
+                if isinstance(comment_data, dict):
+                    author = comment_data.get('author', 'Unknown')
+                    text = comment_data.get('text', '')
+                    likes = comment_data.get('votes', {}).get('likes', 0) if isinstance(comment_data.get('votes'), dict) else comment_data.get('likes', 0)
+                else:
+                    # Если это объект, пробуем получить атрибуты
+                    author = getattr(comment_data, 'author', 'Unknown')
+                    text = getattr(comment_data, 'text', '')
+                    likes = getattr(comment_data, 'likes', 0)
+                
                 comment = Comment(
                     video_id=video.id,
-                    author=comment_data.get('author', 'Unknown'),
-                    text=comment_data.get('text', ''),
-                    likes=comment_data.get('votes', {}).get('likes', 0),
+                    author=author,
+                    text=text,
+                    likes=likes,
                     published_at=None  # Можно улучшить парсинг даты
                 )
                 self.session.add(comment)

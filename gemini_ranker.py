@@ -407,7 +407,7 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
         comments_text = ""
         for i, comment in enumerate(comments, 1):
             # Ограничиваем длину каждого комментария для экономии токенов
-            comment_preview = comment.text[:200] + "..." if len(comment.text) > 200 else comment.text
+            comment_preview = comment.text[:500] + "..." if len(comment.text) > 500 else comment.text
             comments_text += f"{i}. {comment_preview}\n"
         
         return f"""Rate the informativeness of ALL these comments relative to the video content on a scale from 0.0 to 1.0.
