@@ -14,6 +14,7 @@
 import sys
 import os
 import time
+import json
 from urllib.parse import urlparse, parse_qs
 from youtube_comment_downloader import YoutubeCommentDownloader
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -21,6 +22,7 @@ import requests
 from models import Video, Comment, get_db_session
 from gemini_ranker import GeminiCommentRanker
 from comment_ranker import CommentRanker
+import re
 
 class VideoProcessor:
     """Полный пайплайн обработки видео с мега-ранжированием"""
@@ -30,6 +32,71 @@ class VideoProcessor:
         self.downloader = YoutubeCommentDownloader()
         self.gemini_api_key = gemini_api_key or os.getenv('GEMINI_API_KEY')
         
+    def _save_comments_to_json(self, video_id: int, video_url: str, youtube_video_id: str):
+        """Сохраняет комментарии в JSON файл с дополнительными полями"""
+        try:
+            print("💾 Сохраняю комментарии в JSON файл...")
+            
+            # Получаем комментарии из базы данных
+            comments = self.session.query(Comment).filter_by(video_id=video_id).all()
+            
+            comments_data = []
+            for comment in comments:
+                # Формируем ссылку на комментарий в YouTube
+                comment_url = f"https://www.youtube.com/watch?v={youtube_video_id}&lc={comment.comment_id}" if comment.comment_id else None
+                
+                comment_dict = {
+                    "database_id": comment.id,  # ID в базе данных
+                    "comment_id": comment.comment_id,
+                    "video_url": video_url,  # Адрес исходного видео
+                    "comment_url": comment_url,  # Ссылка на комментарий в YouTube
+                    "author": comment.author,
+                    "text": comment.text,
+                    "likes": comment.likes,
+                    "published_at": comment.published_at.isoformat() if comment.published_at else None,
+                    "parent_id": comment.parent_id,
+                    "comment_rank": comment.comment_rank
+                }
+                comments_data.append(comment_dict)
+            
+            # Сохраняем в файл
+            with open("comments.json", "w", encoding="utf-8") as f:
+                json.dump(comments_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ Сохранено {len(comments_data)} комментариев в comments.json")
+            
+        except Exception as e:
+            print(f"❌ Ошибка сохранения комментариев в JSON: {e}")
+    
+    def _save_summary_to_json(self, video_id: int, video_url: str, youtube_video_id: str):
+        """Сохраняет summary в JSON файл с дополнительными полями"""
+        try:
+            print("💾 Сохраняю summary в JSON файл...")
+            
+            # Получаем видео из базы данных
+            video = self.session.query(Video).filter_by(id=video_id).first()
+            if not video:
+                print("❌ Видео не найдено в базе данных")
+                return
+            
+            summary_data = {
+                "database_video_id": video.id,  # ID исходного видео в базе
+                "youtube_video_id": youtube_video_id,
+                "video_title": video.title,  # Название видео
+                "video_url": video_url,  # Адрес исходного видео
+                "summary": video.summary,
+                "created_at": video.upload_date
+            }
+            
+            # Сохраняем в файл
+            with open("summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary_data, f, ensure_ascii=False, indent=2)
+            
+            print("✅ Summary сохранен в summary.json")
+            
+        except Exception as e:
+            print(f"❌ Ошибка сохранения summary в JSON: {e}")
+    
     def process_video(self, video_url: str) -> bool:
         """
         Полная обработка видео: от URL до ранжированных комментариев
@@ -95,7 +162,27 @@ class VideoProcessor:
                 # Теперь запускаем ранжирование
                 print("\n🚀 ЭТАП 5: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
                 print("-" * 40)
-                return self._rank_existing_video(existing_video.id)
+                ranking_success = self._rank_existing_video(existing_video.id)
+                
+                # Сохраняем JSON файлы после ранжирования
+                print("\n💾 ЭТАП 6: СОХРАНЕНИЕ JSON ФАЙЛОВ")
+                print("-" * 40)
+                self._save_comments_to_json(existing_video.id, video_url, video_id)
+                self._save_summary_to_json(existing_video.id, video_url, video_id)
+                
+                print("\n🎉" + "="*70)
+                if ranking_success:
+                    print("✅ ПОЛНАЯ ОБРАБОТКА ЗАВЕРШЕНА УСПЕШНО!")
+                    print("🌟 Видео готово к использованию с ранжированными комментариями")
+                else:
+                    print("⚠️ ОБРАБОТКА ЗАВЕРШЕНА С ПРЕДУПРЕЖДЕНИЯМИ")
+                    print("📊 Видео сохранено, но ранжирование может быть неполным")
+                print("="*72)
+                
+                # Показываем результаты для существующего видео
+                self._show_results(existing_video.id)
+                
+                return ranking_success
             
             # 3. Загружаем комментарии
             print("\n📥 ЭТАП 1: ЗАГРУЗКА КОММЕНТАРИЕВ")
@@ -127,6 +214,12 @@ class VideoProcessor:
             print("\n🚀 ЭТАП 5: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
             print("-" * 40)
             ranking_success = self._rank_comments_mega(db_video_id)
+            
+            # Сохраняем JSON файлы после ранжирования
+            print("\n💾 ЭТАП 6: СОХРАНЕНИЕ JSON ФАЙЛОВ")
+            print("-" * 40)
+            self._save_comments_to_json(db_video_id, video_url, video_id)
+            self._save_summary_to_json(db_video_id, video_url, video_id)
             
             print("\n🎉" + "="*70)
             if ranking_success:
@@ -239,13 +332,13 @@ class VideoProcessor:
                     prompt = f"""Создай краткое содержание (summary) этого видео на основе транскрипта.
                     
 Требования:
-- Длина: 2-3 предложения
-- Язык: русский
+- Длина: 20-30 предложений
+- Язык: English
 - Основные темы и ключевые моменты
 - Четкий и информативный стиль
 
 Транскрипт:
-{transcript[:3000]}...
+{transcript[:100000]}...
 
 Summary:"""
                     
@@ -318,26 +411,61 @@ Summary:"""
             # Сохраняем комментарии
             print(f"💬 Сохраняю {len(comments_data)} комментариев...")
             
+            saved_count = 0
+            skipped_count = 0
+            
             for comment_data in comments_data:
-                # Обрабатываем разные форматы данных комментариев
-                if isinstance(comment_data, dict):
-                    author = comment_data.get('author', 'Unknown')
-                    text = comment_data.get('text', '')
-                    likes = comment_data.get('votes', {}).get('likes', 0) if isinstance(comment_data.get('votes'), dict) else comment_data.get('likes', 0)
-                else:
-                    # Если это объект, пробуем получить атрибуты
-                    author = getattr(comment_data, 'author', 'Unknown')
-                    text = getattr(comment_data, 'text', '')
-                    likes = getattr(comment_data, 'likes', 0)
-                
-                comment = Comment(
-                    video_id=video.id,
-                    author=author,
-                    text=text,
-                    likes=likes,
-                    published_at=None  # Можно улучшить парсинг даты
-                )
-                self.session.add(comment)
+                try:
+                    # Обрабатываем разные форматы данных комментариев
+                    if isinstance(comment_data, dict):
+                        comment_id = comment_data.get('cid')  # Получаем cid как comment_id
+                        author = comment_data.get('author', 'Unknown')
+                        text = comment_data.get('text', '')
+                        likes = parse_likes_count(comment_data.get('votes', 0))
+                        # Пробуем парсить дату
+                        published_at = None
+                        if comment_data.get('time'):
+                            try:
+                                # Если есть time_parsed, используем его
+                                if comment_data.get('time_parsed'):
+                                    from datetime import datetime
+                                    published_at = datetime.fromtimestamp(comment_data['time_parsed'])
+                            except:
+                                pass
+                    else:
+                        # Если это объект, пробуем получить атрибуты
+                        comment_id = getattr(comment_data, 'cid', None)
+                        author = getattr(comment_data, 'author', 'Unknown')
+                        text = getattr(comment_data, 'text', '')
+                        likes = parse_likes_count(getattr(comment_data, 'votes', 0))
+                        published_at = None
+                    
+                    # Проверяем, существует ли уже комментарий с таким comment_id
+                    if comment_id:
+                        existing_comment = self.session.query(Comment).filter_by(comment_id=comment_id).first()
+                        if existing_comment:
+                            skipped_count += 1
+                            continue
+                    
+                    comment = Comment(
+                        comment_id=comment_id,  # Добавляем comment_id
+                        video_id=video.id,
+                        author=author,
+                        text=text,
+                        likes=likes,
+                        published_at=published_at
+                    )
+                    self.session.add(comment)
+                    saved_count += 1
+                    
+                except Exception as e:
+                    print(f"⚠️ Ошибка обработки комментария: {e}")
+                    skipped_count += 1
+                    continue
+            
+            print(f"✅ Сохранено новых комментариев: {saved_count}")
+            if skipped_count > 0:
+                print(f"⏭️ Пропущено дубликатов/ошибок: {skipped_count}")
             
             self.session.commit()
             print(f"✅ Все данные сохранены в БД")
@@ -422,6 +550,49 @@ Summary:"""
             
         except Exception as e:
             print(f"❌ Ошибка показа результатов: {e}")
+
+
+def parse_likes_count(likes_str):
+    """Парсит количество лайков из строки YouTube"""
+    if not likes_str or likes_str == '':
+        return 0
+    
+    # Если это уже число
+    if isinstance(likes_str, int):
+        return likes_str
+    
+    # Преобразуем в строку
+    likes_str = str(likes_str).strip()
+    
+    # Если пустая строка
+    if not likes_str:
+        return 0
+    
+    # Убираем пробелы и приводим к нижнему регистру
+    likes_str = likes_str.lower().replace(' ', '')
+    
+    # Обрабатываем сокращения
+    if 'тыс' in likes_str or 'k' in likes_str:
+        # Извлекаем число перед "тыс" или "k"
+        match = re.search(r'(\d+(?:[,\.]\d+)?)', likes_str)
+        if match:
+            number = match.group(1).replace(',', '.')
+            return int(float(number) * 1000)
+    
+    if 'млн' in likes_str or 'm' in likes_str:
+        # Извлекаем число перед "млн" или "m"
+        match = re.search(r'(\d+(?:[,\.]\d+)?)', likes_str)
+        if match:
+            number = match.group(1).replace(',', '.')
+            return int(float(number) * 1000000)
+    
+    # Пробуем извлечь просто число
+    match = re.search(r'(\d+)', likes_str)
+    if match:
+        return int(match.group(1))
+    
+    # Если ничего не получилось
+    return 0
 
 
 def main():

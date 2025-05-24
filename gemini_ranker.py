@@ -5,6 +5,111 @@ import os
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from models import Video, Comment, get_db_session
+from datetime import datetime, timedelta
+
+class GeminiRateLimiter:
+    """Система управления лимитами запросов для Gemini API"""
+    
+    def __init__(self):
+        # Лимиты для бесплатного тарифа Gemini 2.0 Flash
+        self.rpm_limit = 30  # запросов в минуту
+        self.tpm_limit = 1000000  # токенов в минуту
+        self.rpd_limit = 1500  # запросов в день
+        
+        # Трекинг запросов
+        self.requests_minute = []  # список временных меток запросов за последнюю минуту
+        self.requests_day = []  # список временных меток запросов за последний день
+        self.tokens_minute = []  # список (время, количество_токенов) за последнюю минуту
+        
+    def can_make_request(self, estimated_tokens: int = 1000) -> bool:
+        """Проверяет, можно ли сделать запрос с учетом лимитов"""
+        now = datetime.now()
+        
+        # Очищаем старые записи
+        self._cleanup_old_records(now)
+        
+        # Проверяем лимиты
+        rpm_ok = len(self.requests_minute) < self.rpm_limit
+        rpd_ok = len(self.requests_day) < self.rpd_limit
+        
+        # Проверяем лимит токенов в минуту
+        current_tokens = sum(tokens for _, tokens in self.tokens_minute)
+        tpm_ok = (current_tokens + estimated_tokens) <= self.tpm_limit
+        
+        return rpm_ok and rpd_ok and tpm_ok
+    
+    def wait_if_needed(self, estimated_tokens: int = 1000) -> float:
+        """Ждет, если необходимо, чтобы соблюсти лимиты. Возвращает время ожидания."""
+        if self.can_make_request(estimated_tokens):
+            return 0.0
+        
+        now = datetime.now()
+        self._cleanup_old_records(now)
+        
+        wait_times = []
+        
+        # Рассчитываем время ожидания для RPM
+        if len(self.requests_minute) >= self.rpm_limit:
+            oldest_request = min(self.requests_minute)
+            wait_time_rpm = 60 - (now - oldest_request).total_seconds()
+            if wait_time_rpm > 0:
+                wait_times.append(wait_time_rpm)
+        
+        # Рассчитываем время ожидания для TPM
+        current_tokens = sum(tokens for _, tokens in self.tokens_minute)
+        if (current_tokens + estimated_tokens) > self.tpm_limit:
+            # Ждем, пока не освободятся токены
+            if self.tokens_minute:
+                oldest_token_time = min(time for time, _ in self.tokens_minute)
+                wait_time_tpm = 60 - (now - oldest_token_time).total_seconds()
+                if wait_time_tpm > 0:
+                    wait_times.append(wait_time_tpm)
+        
+        # Берем максимальное время ожидания
+        if wait_times:
+            wait_time = max(wait_times)
+            print(f"⏳ Ожидание {wait_time:.1f} сек для соблюдения лимитов API...")
+            time.sleep(wait_time)
+            return wait_time
+        
+        return 0.0
+    
+    def record_request(self, tokens_used: int = 1000):
+        """Записывает выполненный запрос"""
+        now = datetime.now()
+        self.requests_minute.append(now)
+        self.requests_day.append(now)
+        self.tokens_minute.append((now, tokens_used))
+        
+        # Очищаем старые записи
+        self._cleanup_old_records(now)
+    
+    def _cleanup_old_records(self, now: datetime):
+        """Удаляет старые записи"""
+        # Удаляем запросы старше минуты
+        minute_ago = now - timedelta(minutes=1)
+        self.requests_minute = [t for t in self.requests_minute if t > minute_ago]
+        self.tokens_minute = [(t, tokens) for t, tokens in self.tokens_minute if t > minute_ago]
+        
+        # Удаляем запросы старше дня
+        day_ago = now - timedelta(days=1)
+        self.requests_day = [t for t in self.requests_day if t > day_ago]
+    
+    def get_status(self) -> Dict:
+        """Возвращает текущий статус лимитов"""
+        now = datetime.now()
+        self._cleanup_old_records(now)
+        
+        current_tokens = sum(tokens for _, tokens in self.tokens_minute)
+        
+        return {
+            'rpm_used': len(self.requests_minute),
+            'rpm_limit': self.rpm_limit,
+            'rpd_used': len(self.requests_day),
+            'rpd_limit': self.rpd_limit,
+            'tpm_used': current_tokens,
+            'tpm_limit': self.tpm_limit
+        }
 
 class GeminiCommentRanker:
     """Система ранжирования комментариев с использованием Google Gemini API"""
@@ -19,10 +124,13 @@ class GeminiCommentRanker:
             raise ValueError("Необходимо указать GEMINI_API_KEY")
         
         # Инициализация модели
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        self.batch_size = 10  # Gemini быстрее, можем увеличить размер батча
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.batch_size = 20  # Gemini быстрее, можем увеличить размер батча
         self.use_fallback = use_fallback
-        self.max_retries = 3
+        self.max_retries = 1
+        
+        # Система управления лимитами
+        self.rate_limiter = GeminiRateLimiter()
         
         # Настройки генерации
         self.generation_config = genai.types.GenerationConfig(
@@ -99,11 +207,22 @@ class GeminiCommentRanker:
         """Проверяет доступность Gemini API"""
         try:
             print("🔍 Проверяю доступность Gemini API...")
+            
+            # Ждем, если нужно соблюсти лимиты
+            estimated_tokens = 20  # небольшой тестовый запрос
+            wait_time = self.rate_limiter.wait_if_needed(estimated_tokens)
+            if wait_time > 0:
+                status = self.rate_limiter.get_status()
+                print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
+            
             # Простой тестовый запрос
             response = self.model.generate_content(
                 "Ответь одним словом: тест",
                 generation_config=self.generation_config
             )
+            
+            # Записываем запрос
+            self.rate_limiter.record_request(estimated_tokens)
             
             if response and response.text:
                 print(f"✅ Gemini API доступен. Тестовый ответ: {response.text.strip()}")
@@ -114,6 +233,8 @@ class GeminiCommentRanker:
                 
         except Exception as e:
             print(f"❌ Ошибка при проверке Gemini API: {e}")
+            if "429" in str(e) or "quota" in str(e).lower():
+                print("🚫 Превышен лимит API при проверке доступности")
             return False
     
     def _process_batch(self, comments: List[Comment], video_summary: str, session: Session, gemini_available: bool) -> int:
@@ -163,12 +284,24 @@ class GeminiCommentRanker:
             # Создаем промпт для батчевой обработки
             prompt = self._create_batch_ranking_prompt(comments, video_summary)
             
+            # Оценка количества токенов (примерно)
+            estimated_tokens = len(prompt.split()) + len(comments) * 5  # промпт + ответы
+            
             for attempt in range(self.max_retries):
                 try:
+                    # Ждем, если нужно соблюсти лимиты
+                    wait_time = self.rate_limiter.wait_if_needed(estimated_tokens)
+                    if wait_time > 0:
+                        status = self.rate_limiter.get_status()
+                        print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
+                    
                     response = self.model.generate_content(
                         prompt,
                         generation_config=self.generation_config
                     )
+                    
+                    # Записываем запрос
+                    self.rate_limiter.record_request(estimated_tokens)
                     
                     if response and response.text:
                         ranks = self._extract_batch_ranks_from_response(response.text, len(comments))
@@ -177,7 +310,12 @@ class GeminiCommentRanker:
                     
                 except Exception as e:
                     print(f"⚠️ Попытка {attempt + 1}/{self.max_retries} не удалась: {e}")
-                    if attempt < self.max_retries - 1:
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        # Если превышен лимит, ждем дольше
+                        wait_time = 60  # ждем минуту
+                        print(f"🚫 Превышен лимит API, ожидание {wait_time} сек...")
+                        time.sleep(wait_time)
+                    elif attempt < self.max_retries - 1:
                         time.sleep(1)
             
             return None
@@ -190,12 +328,24 @@ class GeminiCommentRanker:
         """Ранжирует один комментарий с помощью Gemini"""
         prompt = self._create_ranking_prompt(comment_text, video_summary)
         
+        # Оценка количества токенов (примерно)
+        estimated_tokens = len(prompt.split()) + 50  # промпт + ответ
+        
         for attempt in range(self.max_retries):
             try:
+                # Ждем, если нужно соблюсти лимиты
+                wait_time = self.rate_limiter.wait_if_needed(estimated_tokens)
+                if wait_time > 0:
+                    status = self.rate_limiter.get_status()
+                    print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
+                
                 response = self.model.generate_content(
                     prompt,
                     generation_config=self.generation_config
                 )
+                
+                # Записываем запрос
+                self.rate_limiter.record_request(estimated_tokens)
                 
                 if response and response.text:
                     rank = self._extract_rank_from_response(response.text)
@@ -204,7 +354,12 @@ class GeminiCommentRanker:
                         
             except Exception as e:
                 print(f"⚠️ Попытка {attempt + 1}/{self.max_retries}: {e}")
-                if attempt < self.max_retries - 1:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    # Если превышен лимит, ждем дольше
+                    wait_time = 60  # ждем минуту
+                    print(f"🚫 Превышен лимит API, ожидание {wait_time} сек...")
+                    time.sleep(wait_time)
+                elif attempt < self.max_retries - 1:
                     time.sleep(1)
         
         # Если Gemini не сработал, используем fallback
@@ -353,6 +508,10 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
             # Создаем мега-промпт для всех комментариев
             prompt = self._create_mega_ranking_prompt(comments, video_summary)
             
+            # Оценка количества токенов (большой запрос)
+            estimated_tokens = len(prompt.split()) + len(comments) * 3  # промпт + ответы
+            print(f"🔢 Оценка токенов: ~{estimated_tokens}")
+            
             # Увеличиваем лимиты для большого запроса
             mega_config = genai.types.GenerationConfig(
                 temperature=0.1,
@@ -367,10 +526,19 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
                 try:
                     print(f"🔄 Попытка {attempt + 1}/{self.max_retries}...")
                     
+                    # Ждем, если нужно соблюсти лимиты
+                    wait_time = self.rate_limiter.wait_if_needed(estimated_tokens)
+                    if wait_time > 0:
+                        status = self.rate_limiter.get_status()
+                        print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
+                    
                     response = self.model.generate_content(
                         prompt,
                         generation_config=mega_config
                     )
+                    
+                    # Записываем запрос
+                    self.rate_limiter.record_request(estimated_tokens)
                     
                     if response and response.text:
                         elapsed = time.time() - start_time
@@ -389,11 +557,17 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
                             print(f"✅ Успешно проранжировано: {successful_ranks}/{len(comments)} комментариев")
                             return True
                         else:
+                            print(f"⚠️ Найдено только {len(ranks) if ranks else 0} рангов из {len(comments)}")
                             print(f"⚠️ Получено {len(ranks) if ranks else 0} рангов, ожидалось {len(comments)}")
                     
                 except Exception as e:
-                    print(f"❌ Попытка {attempt + 1} не удалась: {e}")
-                    if attempt < self.max_retries - 1:
+                    print(f"⚠️ Попытка {attempt + 1}/3 не удалась: {e}")
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        # Если превышен лимит, ждем дольше
+                        wait_time = 60  # ждем минуту
+                        print(f"🚫 Превышен лимит API, ожидание {wait_time} сек...")
+                        time.sleep(wait_time)
+                    elif attempt < self.max_retries - 1:
                         time.sleep(2)
             
             return False
@@ -474,11 +648,34 @@ Ratings:"""
         print("🔄 Переключаюсь на батчевую обработку...")
         
         successful_ranks = 0
+        total_batches = (len(comments) + self.batch_size - 1) // self.batch_size
+        
         for i in range(0, len(comments), self.batch_size):
+            batch_num = (i // self.batch_size) + 1
             batch = comments[i:i + self.batch_size]
+            
+            print(f"📦 Обрабатываю батч {batch_num}/{total_batches} ({len(batch)} комментариев)...")
+            
+            # Показываем статус лимитов перед каждым батчем
+            status = self.rate_limiter.get_status()
+            print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM, {status['rpd_used']}/{status['rpd_limit']} RPD")
+            
             batch_success = self._process_batch(batch, video_summary, session, True)
             successful_ranks += batch_success
-            time.sleep(0.5)  # Пауза между батчами
+            
+            # Интеллектуальная задержка между батчами
+            if batch_num < total_batches:  # не ждем после последнего батча
+                # Базовая задержка для соблюдения лимитов
+                base_delay = 60 / self.rate_limiter.rpm_limit  # ~4 секунды для 15 RPM
+                
+                # Дополнительная задержка если приближаемся к лимитам
+                if status['rpm_used'] >= self.rate_limiter.rpm_limit * 0.8:  # 80% от лимита
+                    additional_delay = 10
+                    print(f"⚠️ Приближение к лимиту RPM, дополнительная задержка {additional_delay} сек")
+                    base_delay += additional_delay
+                
+                print(f"⏳ Пауза между батчами: {base_delay:.1f} сек...")
+                time.sleep(base_delay)
             
         session.commit()
         print(f"✅ Батчевое ранжирование завершено: {successful_ranks}/{len(comments)}")

@@ -4,11 +4,12 @@ import requests
 from youtube_comment_downloader import YoutubeCommentDownloader
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from models import Base, Video, Comment, Transcript
+from models import Base, Video, Comment
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from urllib.parse import urlparse, parse_qs
 import time
+import re
 
 def get_db_session():
     db_host = os.getenv("DB_HOST", "localhost")
@@ -31,9 +32,38 @@ def download_comments(video_url):
             print(f"Скачано {i} комментариев...")
     return comments
 
-def save_comments_json(comments, filename):
+def save_comments_json(comments, filename, video_url=None, video_db_id=None):
+    """Сохраняет комментарии в JSON файл с дополнительными полями"""
+    enhanced_comments = []
+    
+    for comment in comments:
+        # Извлекаем video_id из URL для формирования ссылки на комментарий
+        video_id = extract_video_id(video_url) if video_url else None
+        comment_url = None
+        
+        if video_id and comment.get('cid'):
+            comment_url = f"https://www.youtube.com/watch?v={video_id}&lc={comment.get('cid')}"
+        
+        enhanced_comment = {
+            "database_id": video_db_id,  # ID видео в базе данных
+            "comment_id": comment.get('cid'),  # Исправляем на cid
+            "video_url": video_url,  # Адрес исходного видео
+            "comment_url": comment_url,  # Ссылка на комментарий в YouTube
+            "text": comment.get('text'),
+            "time": comment.get('time'),
+            "author": comment.get('author'),
+            "channel": comment.get('channel'),
+            "votes": comment.get('votes'),
+            "replies": comment.get('replies'),
+            "photo": comment.get('photo'),
+            "heart": comment.get('heart'),
+            "reply": comment.get('reply'),
+            "time_parsed": comment.get('time_parsed')
+        }
+        enhanced_comments.append(enhanced_comment)
+    
     with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(comments, f, indent=4, ensure_ascii=False)
+        json.dump(enhanced_comments, f, indent=4, ensure_ascii=False)
 
 def save_to_db(video_url, comments):
     session = get_db_session()
@@ -67,7 +97,7 @@ def save_to_db(video_url, comments):
             video_id=video.id,
             author=c.get('author'),
             text=c.get('text'),
-            likes=c.get('likes', 0),
+            likes=parse_likes_count(c.get('votes')),
             published_at=published_at,
             parent_id=c.get('parent')
         )
@@ -125,6 +155,48 @@ def generate_summary(text):
             print(f"Неизвестная ошибка при генерации саммари: {e}")
             return None
 
+def parse_likes_count(likes_str):
+    """Парсит количество лайков из строки YouTube"""
+    if not likes_str or likes_str == '':
+        return 0
+    
+    # Если это уже число
+    if isinstance(likes_str, int):
+        return likes_str
+    
+    # Преобразуем в строку
+    likes_str = str(likes_str).strip()
+    
+    # Если пустая строка
+    if not likes_str:
+        return 0
+    
+    # Убираем пробелы и приводим к нижнему регистру
+    likes_str = likes_str.lower().replace(' ', '')
+    
+    # Обрабатываем сокращения
+    if 'тыс' in likes_str or 'k' in likes_str:
+        # Извлекаем число перед "тыс" или "k"
+        match = re.search(r'(\d+(?:[,\.]\d+)?)', likes_str)
+        if match:
+            number = match.group(1).replace(',', '.')
+            return int(float(number) * 1000)
+    
+    if 'млн' in likes_str or 'm' in likes_str:
+        # Извлекаем число перед "млн" или "m"
+        match = re.search(r'(\d+(?:[,\.]\d+)?)', likes_str)
+        if match:
+            number = match.group(1).replace(',', '.')
+            return int(float(number) * 1000000)
+    
+    # Пробуем извлечь просто число
+    match = re.search(r'(\d+)', likes_str)
+    if match:
+        return int(match.group(1))
+    
+    # Если ничего не получилось
+    return 0
+
 def main():
     video_url = os.environ.get("VIDEO_URL")
     if not video_url:
@@ -138,29 +210,29 @@ def main():
         # Скачиваем и сохраняем комментарии и видео, если оно новое
         print(f"Скачиваем комментарии для {video_url}...")
         comments = download_comments(video_url)
-        filename = "comments.json"
-        save_comments_json(comments, filename)
-        print(f"Комментарии сохранены в файл {filename}")
-        save_to_db(video_url, comments) # Эта функция теперь создает видео, если его нет
+        save_to_db(video_url, comments) # Сначала сохраняем в БД
         print(f"Комментарии и видео сохранены в базу данных PostgreSQL")
 
-        # Обновляем объект video после возможного создания в save_to_db
+        # Обновляем объект video после создания в save_to_db
         video = session.query(Video).filter_by(youtube_url=video_url).first()
+        
+        # Теперь сохраняем в JSON с правильным video.id
+        filename = "comments.json"
+        save_comments_json(comments, filename, video_url, video.id if video else None)
+        print(f"Комментарии сохранены в файл {filename}")
 
     # --- Транскрипт и summary (для существующего или нового видео) ---
     video_id = extract_video_id(video_url)
 
     if video_id and video:
         # Проверяем, есть ли уже транскрипт для этого видео
-        transcript = session.query(Transcript).filter_by(video_id=video.id).first()
-        transcript_text = transcript.content if transcript else None
+        transcript_text = video.transcript
 
         if not transcript_text:
             print(f"Скачиваем транскрипт для video_id: {video_id}...")
             transcript_text = get_transcript(video_id)
             if transcript_text:
-                new_transcript = Transcript(video_id=video.id, content=transcript_text)
-                session.add(new_transcript)
+                video.transcript = transcript_text
                 session.commit() # Сохраняем транскрипт сразу
                 print("✅ Транскрипт сохранен в базу.")
             else:
@@ -179,8 +251,17 @@ def main():
                 print("Сгенерированное summary:")
                 print(summary)
                 # Сохраняем summary в файл
+                video_id_youtube = extract_video_id(video_url)
+                summary_data = {
+                    "database_video_id": video.id,  # ID исходного видео в базе
+                    "youtube_video_id": video_id_youtube,
+                    "video_title": video.title,  # Название видео
+                    "video_url": video_url,  # Адрес исходного видео
+                    "summary": summary,
+                    "created_at": video.upload_date
+                }
                 with open("summary.json", "w", encoding="utf-8") as f:
-                    json.dump({"summary": summary}, f, ensure_ascii=False, indent=2)
+                    json.dump(summary_data, f, ensure_ascii=False, indent=2)
                     print("Summary также сохранено в summary.json")
             else:
                  print("⚠️ Не удалось сгенерировать саммари.")
@@ -188,6 +269,19 @@ def main():
              print("✅ Саммари уже существует в базе.")
              print("Существующее summary:")
              print(video.summary)
+             # Сохраняем существующий summary в файл
+             video_id_youtube = extract_video_id(video_url)
+             summary_data = {
+                 "database_video_id": video.id,  # ID исходного видео в базе
+                 "youtube_video_id": video_id_youtube,
+                 "video_title": video.title,  # Название видео
+                 "video_url": video_url,  # Адрес исходного видео
+                 "summary": video.summary,
+                 "created_at": video.upload_date
+             }
+             with open("summary.json", "w", encoding="utf-8") as f:
+                 json.dump(summary_data, f, ensure_ascii=False, indent=2)
+                 print("Существующий summary также сохранен в summary.json")
         else:
             print("⚠️ Пропускаем генерацию саммари — нет транскрипта.")
     else:
