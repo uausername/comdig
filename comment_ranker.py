@@ -7,15 +7,12 @@ from sqlalchemy.orm import Session
 from models import Video, Comment, get_db_session
 
 class CommentRanker:
-    """Система ранжирования комментариев по информативности"""
+    """Система ранжирования комментариев по информативности (только эвристический алгоритм)"""
     
-    def __init__(self, llm_service_url: str = "http://summarizer-llm:8000", use_fallback: bool = True):
-        self.llm_service_url = llm_service_url
+    def __init__(self, use_fallback: bool = True):
         self.batch_size = 5  # Размер батча для обработки
         self.use_fallback = use_fallback  # Использовать fallback при ошибках LLM
-        self.timeout = 30  # Таймаут для запросов к LLM
-        self.max_retries = 2  # Максимальное количество попыток
-        
+    
     def rank_comments_for_video(self, video_id: int) -> bool:
         """
         Ранжирует все комментарии для указанного видео
@@ -50,19 +47,14 @@ class CommentRanker:
                 
             print(f"🔄 Начинаю ранжирование {len(comments)} комментариев для видео {video_id}")
             
-            # Проверяем доступность LLM
-            llm_available = self._check_llm_availability()
-            if not llm_available and self.use_fallback:
-                print("⚠️ LLM недоступна, переключаюсь на эвристический алгоритм")
-            elif not llm_available:
-                print("❌ LLM недоступна и fallback отключен")
-                return False
+            # Используем только эвристический алгоритм
+            print("📊 Использую эвристический алгоритм ранжирования")
             
             # Обрабатываем комментарии батчами
             successful_ranks = 0
             for i in range(0, len(comments), self.batch_size):
                 batch = comments[i:i + self.batch_size]
-                batch_success = self._process_batch(batch, video.summary, session, llm_available)
+                batch_success = self._process_batch(batch, video.summary, session)
                 successful_ranks += batch_success
                 
                 # Небольшая пауза между батчами
@@ -80,45 +72,17 @@ class CommentRanker:
         finally:
             session.close()
     
-    def _check_llm_availability(self) -> bool:
-        """Проверяет доступность LLM сервиса"""
-        try:
-            print(f"🔍 Проверяю доступность LLM: {self.llm_service_url}")
-            # Проверяем доступность через endpoint /summarize с коротким тестовым запросом
-            response = requests.post(
-                f"{self.llm_service_url}/summarize",
-                json={"text": "test"},
-                timeout=60
-            )
-            print(f"📡 Ответ LLM: статус {response.status_code}")
-            if response.status_code == 200:
-                result = response.json()
-                print(f"📄 Содержимое ответа: {result}")
-                has_summary = result.get("summary") is not None
-                print(f"✅ LLM доступна: {has_summary}")
-                return has_summary
-            else:
-                print(f"❌ LLM недоступна: неверный статус {response.status_code}")
-                return False
-        except Exception as e:
-            print(f"❌ Ошибка при проверке LLM: {e}")
-            return False
-    
-    def _process_batch(self, comments: List[Comment], video_summary: str, session: Session, llm_available: bool) -> int:
+    def _process_batch(self, comments: List[Comment], video_summary: str, session: Session) -> int:
         """Обрабатывает батч комментариев"""
         successful_ranks = 0
         for comment in comments:
             try:
-                if llm_available:
-                    rank = self._rank_single_comment_llm(comment.text, video_summary)
-                else:
-                    rank = self._rank_single_comment_fallback(comment.text, video_summary)
+                rank = self._rank_single_comment_fallback(comment.text, video_summary)
                     
                 if rank is not None:
                     comment.comment_rank = rank
                     successful_ranks += 1
-                    method = "LLM" if llm_available else "эвристика"
-                    print(f"📊 Комментарий ID {comment.id}: ранг {rank:.3f} ({method})")
+                    print(f"📊 Комментарий ID {comment.id}: ранг {rank:.3f}")
                 else:
                     print(f"⚠️ Не удалось проранжировать комментарий ID {comment.id}")
                     
@@ -126,52 +90,6 @@ class CommentRanker:
                 print(f"❌ Ошибка при обработке комментария ID {comment.id}: {e}")
         
         return successful_ranks
-    
-    def _rank_single_comment_llm(self, comment_text: str, video_summary: str) -> Optional[float]:
-        """
-        Ранжирует один комментарий с помощью LLM
-        
-        Args:
-            comment_text: Текст комментария
-            video_summary: Краткое содержание видео
-            
-        Returns:
-            float: Ранг от 0.0 до 1.0 или None при ошибке
-        """
-        prompt = self._create_ranking_prompt(comment_text, video_summary)
-        
-        for attempt in range(self.max_retries):
-            try:
-                response = requests.post(
-                    f"{self.llm_service_url}/summarize",
-                    json={"text": prompt},
-                    timeout=self.timeout
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    content = result.get("summary", "").strip()
-                    
-                    # Извлекаем числовую оценку из ответа
-                    rank = self._extract_rank_from_response(content)
-                    if rank is not None:
-                        return rank
-                else:
-                    print(f"❌ Ошибка LLM сервиса: {response.status_code}")
-                    
-            except requests.exceptions.Timeout:
-                print(f"⏰ Таймаут LLM (попытка {attempt + 1}/{self.max_retries})")
-                if attempt < self.max_retries - 1:
-                    time.sleep(2)  # Пауза перед повторной попыткой
-            except requests.exceptions.RequestException as e:
-                print(f"❌ Ошибка соединения с LLM: {e}")
-                break
-        
-        # Если LLM не сработала, используем fallback
-        if self.use_fallback:
-            return self._rank_single_comment_fallback(comment_text, video_summary)
-        
-        return None
     
     def _rank_single_comment_fallback(self, comment_text: str, video_summary: str) -> float:
         """

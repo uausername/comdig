@@ -4,7 +4,7 @@
 
 - **Docker** и **Docker Compose**
 - **Git**
-- Минимум **2GB** свободного места на диске (для модели)
+- **Gemini API ключ** (для генерации саммари и ранжирования)
 
 ## 🚀 Пошаговая установка
 
@@ -15,60 +15,35 @@ git clone https://github.com/uausername/comdig.git
 cd comdig
 ```
 
-### 2. Скачивание модели Qwen2
+### 2. Настройка API ключей
 
-Модель не включена в репозиторий из-за большого размера (940MB). Скачайте её вручную:
+Создайте файл `.env` в корне проекта:
 
-#### Вариант A: Через wget (Linux/macOS)
 ```bash
-mkdir -p summarizer/model
-wget -O summarizer/model/qwen2-1_5b-instruct-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen2-1.5B-Instruct-GGUF/resolve/main/qwen2-1_5b-instruct-q4_k_m.gguf
+# Gemini API ключ (обязательно для лучшего качества)
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-#### Вариант B: Через curl
-```bash
-mkdir -p summarizer/model
-curl -L -o summarizer/model/qwen2-1_5b-instruct-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen2-1.5B-Instruct-GGUF/resolve/main/qwen2-1_5b-instruct-q4_k_m.gguf
-```
+**Получение Gemini API ключа:**
+1. Перейдите на [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Создайте новый API ключ
+3. Скопируйте его в файл `.env`
 
-#### Вариант C: Ручное скачивание
-1. Перейдите на [страницу модели](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct-GGUF)
-2. Скачайте файл `qwen2-1_5b-instruct-q4_k_m.gguf`
-3. Поместите его в папку `summarizer/model/`
-
-### 3. Проверка структуры
-
-Убедитесь, что структура проекта выглядит так:
-
-```
-comdig/
-├── summarizer/
-│   ├── model/
-│   │   └── qwen2-1_5b-instruct-q4_k_m.gguf  ← Этот файл должен быть!
-│   ├── summarizer_api.py
-│   └── Dockerfile
-├── docker-compose.yml
-├── comments_downloader.py
-└── ...
-```
-
-### 4. Запуск системы
+### 3. Запуск системы
 
 ```bash
 docker-compose up -d
 ```
 
-### 5. Проверка работы
+### 4. Проверка работы
 
 ```bash
 # Проверка статуса контейнеров
 docker-compose ps
 
 # Просмотр логов
-docker-compose logs summarizer-llm
 docker-compose logs comments-downloader
+docker-compose logs db
 ```
 
 ## 🔧 Настройка видео для обработки
@@ -88,14 +63,16 @@ docker-compose restart comments-downloader
 
 ## 🐛 Решение проблем
 
-### Проблема: Модель не найдена
+### Проблема: Нет Gemini API ключа
 ```
-Error: Model file not found
+⚠️ GEMINI_API_KEY не найден
+🔄 Использую fallback summary...
 ```
 
-**Решение:** Убедитесь, что файл модели находится в правильном месте:
+**Решение:** Добавьте API ключ в файл `.env`:
 ```bash
-ls -la summarizer/model/qwen2-1_5b-instruct-q4_k_m.gguf
+echo "GEMINI_API_KEY=your_key_here" > .env
+docker-compose restart comments-downloader
 ```
 
 ### Проблема: Контейнер не запускается
@@ -105,7 +82,7 @@ Error: Container failed to start
 
 **Решение:** Проверьте логи:
 ```bash
-docker-compose logs summarizer-llm
+docker-compose logs comments-downloader
 ```
 
 ### Проблема: Нет доступа к YouTube
@@ -135,8 +112,11 @@ FROM videos v
 LEFT JOIN comments c ON v.id = c.video_id 
 GROUP BY v.id, v.youtube_url;
 
--- Последние комментарии
-SELECT author, text, likes FROM comments ORDER BY published_at DESC LIMIT 10;
+-- Топ комментарии с рангами
+SELECT author, text, comment_rank, likes 
+FROM comments 
+WHERE comment_rank IS NOT NULL 
+ORDER BY comment_rank DESC LIMIT 10;
 ```
 
 ## 🔄 Обновление проекта
@@ -146,6 +126,26 @@ git pull origin main
 docker-compose down
 docker-compose build
 docker-compose up -d
+```
+
+## 🎯 Использование системы
+
+### Обработка видео
+```bash
+# Основной пайплайн
+docker-compose run --rm comments-downloader python process_video.py
+
+# Только скачивание комментариев
+docker-compose run --rm comments-downloader python comments_downloader.py
+```
+
+### Ранжирование комментариев
+```bash
+# Gemini ранжирование (рекомендуется)
+docker-compose run --rm comments-downloader python gemini_ranker.py VIDEO_ID --api-key=YOUR_KEY
+
+# Эвристическое ранжирование (fallback)
+docker-compose run --rm comments-downloader python comment_ranker.py VIDEO_ID
 ```
 
 ## 📞 Поддержка

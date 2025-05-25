@@ -5,14 +5,18 @@ services:
       - "5000:5000"
     depends_on:
       - db
-      - summarizer-llm
     environment:
-      - VIDEO_URL=https://www.youtube.com/watch?v=88K2C3Rbq8w
+      - VIDEO_URL=https://www.youtube.com/watch?v=3TMWNkgbJL0
       - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=comments
       - DB_USER=postgres
       - DB_PASSWORD=postgres
+      # Gemini API ключи для мультиключевой системы
+      - GEMINI_API_KEY=AIzaSyAQGZvaL4fACOmAWQKf-KEbpD_rytMxhos
+      - GEMINI_API_KEY_1=AIzaSyAQGZvaL4fACOmAWQKf-KEbpD_rytMxhos # for project Generative Language Client
+      - GEMINI_API_KEY_2=AIzaSyDLg48EwjCdgajNmqCXK4HLKAjtBcUXAns # for project My Project 94707
+      - GEMINI_API_KEY_3=AIzaSyC3e8mHFb9wAPMQZAi184O6tC9VNkkbgWg # for project My Project 61890
     volumes:
       - ./:/app
     networks:
@@ -31,15 +35,6 @@ services:
       - "5432:5432"
     networks:
       - app-net
-
-  summarizer-llm:
-    build: ./summarizer
-    ports:
-      - "8000:8000"
-    networks:
-      - app-net
-    volumes:
-      - ./summarizer:/app
 
 volumes:
   postgres-data:

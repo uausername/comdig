@@ -12,5 +12,6 @@ RUN pip install -r requirements.txt
 # Копируем остальной код
 COPY . /app
 
-# Запуск команды
-CMD ["python", "comments_downloader.py"]
+# Запуск современного пайплайна с мультиключевой системой
+# Используем переменную окружения VIDEO_URL из docker-compose.yml
+CMD ["sh", "-c", "if [ -n \"$VIDEO_URL\" ]; then python process_video.py \"$VIDEO_URL\"; else echo '❌ Переменная VIDEO_URL не установлена! Установите URL видео в docker-compose.yml'; exit 1; fi"]

@@ -23,6 +23,7 @@ from models import Video, Comment, get_db_session
 from gemini_ranker import GeminiCommentRanker
 from comment_ranker import CommentRanker
 import re
+from multi_key_gemini_ranker import MultiKeyGeminiRanker
 
 class VideoProcessor:
     """Полный пайплайн обработки видео с мега-ранжированием"""
@@ -144,15 +145,30 @@ class VideoProcessor:
                         print("\n📝 ЭТАП 2: ПОЛУЧЕНИЕ ТРАНСКРИПТА")
                         print("-" * 40)
                         transcript = self._get_transcript(video_id)
-                        existing_video.transcript = transcript
+                        
+                        # Проверяем валидность транскрипта
+                        if not transcript:
+                            # Спрашиваем пользователя о ручном вводе summary
+                            manual_summary = self._ask_user_for_manual_summary(video_id)
+                            if not manual_summary:
+                                print("\n❌ ОБРАБОТКА ОСТАНОВЛЕНА")
+                                print("💡 Причина: Транскрипт недоступен, пользователь отказался от ручного ввода summary")
+                                return False
+                            
+                            # Используем пользовательский summary
+                            existing_video.transcript = None
+                            existing_video.summary = manual_summary
+                            print(f"\n✅ Используется пользовательский summary длиной {len(manual_summary)} символов")
+                        else:
+                            existing_video.transcript = transcript
                     else:
                         transcript = existing_video.transcript
                     
-                    # Генерируем summary если его нет
-                    if not has_summary:
+                    # Генерируем summary если его нет и есть транскрипт
+                    if not has_summary and existing_video.transcript:
                         print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
                         print("-" * 40)
-                        summary = self._generate_summary(transcript)
+                        summary = self._generate_summary(existing_video.transcript)
                         existing_video.summary = summary
                     
                     # Сохраняем изменения
@@ -197,26 +213,49 @@ class VideoProcessor:
             print("-" * 40)
             transcript = self._get_transcript(video_id)
             
-            # 5. Генерируем summary
-            print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
-            print("-" * 40)
-            summary = self._generate_summary(transcript)
+            # Проверяем валидность транскрипта
+            if not transcript:
+                # Спрашиваем пользователя о ручном вводе summary
+                manual_summary = self._ask_user_for_manual_summary(video_id)
+                if not manual_summary:
+                    print("\n❌ ОБРАБОТКА ОСТАНОВЛЕНА")
+                    print("💡 Причина: Транскрипт недоступен, пользователь отказался от ручного ввода summary")
+                    return False
+                
+                # Используем пользовательский summary
+                summary = manual_summary
+                print(f"\n✅ Используется пользовательский summary длиной {len(summary)} символов")
+                
+                # Сохраняем видео с пустым транскриптом но с пользовательским summary
+                print("\n💾 ЭТАП 3: СОХРАНЕНИЕ В БАЗУ ДАННЫХ")
+                print("-" * 40)
+                db_video_id = self._save_video_to_db(video_id, video_url, comments_data, None, summary)
+                if not db_video_id:
+                    print("❌ Не удалось сохранить в БД")
+                    return False
+            else:
+                # 5. Генерируем summary из транскрипта
+                print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
+                print("-" * 40)
+                summary = self._generate_summary(transcript)
+                
+                # 6. Сохраняем видео в БД
+                print("\n💾 ЭТАП 4: СОХРАНЕНИЕ В БАЗУ ДАННЫХ")
+                print("-" * 40)
+                db_video_id = self._save_video_to_db(video_id, video_url, comments_data, transcript, summary)
+                if not db_video_id:
+                    print("❌ Не удалось сохранить в БД")
+                    return False
             
-            # 6. Сохраняем видео в БД
-            print("\n💾 ЭТАП 4: СОХРАНЕНИЕ В БАЗУ ДАННЫХ")
-            print("-" * 40)
-            db_video_id = self._save_video_to_db(video_id, video_url, comments_data, transcript, summary)
-            if not db_video_id:
-                print("❌ Не удалось сохранить в БД")
-                return False
-            
-            # 7. МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ
-            print("\n🚀 ЭТАП 5: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
+            # 7. МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ (только если есть summary)
+            next_step = 4 if not transcript else 5
+            print(f"\n🚀 ЭТАП {next_step}: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
             print("-" * 40)
             ranking_success = self._rank_comments_mega(db_video_id)
-            
+
             # Сохраняем JSON файлы после ранжирования
-            print("\n💾 ЭТАП 6: СОХРАНЕНИЕ JSON ФАЙЛОВ")
+            next_step += 1
+            print(f"\n💾 ЭТАП {next_step}: СОХРАНЕНИЕ JSON ФАЙЛОВ")
             print("-" * 40)
             self._save_comments_to_json(db_video_id, video_url, video_id)
             self._save_summary_to_json(db_video_id, video_url, video_id)
@@ -309,16 +348,21 @@ class VideoProcessor:
             
             # Если ничего не найдено
             print("⚠️ Транскрипт недоступен")
-            return "Транскрипт недоступен для данного видео"
+            return None
             
         except Exception as e:
             print(f"⚠️ Общая ошибка получения транскрипта: {e}")
-            print("🔄 Использую fallback - пустой транскрипт")
-            return "Транскрипт недоступен для данного видео"
+            print("❌ Транскрипт недоступен")
+            return None
     
     def _generate_summary(self, transcript: str) -> str:
         """Генерирует summary через Gemini API"""
         try:
+            # Проверяем валидность транскрипта
+            if not transcript or not self._is_transcript_valid(transcript):
+                print("❌ Невозможно сгенерировать summary: транскрипт недоступен")
+                return None
+                
             print("🤖 Генерирую summary через Gemini API...")
             
             # Если есть API ключ Gemini, используем его
@@ -359,26 +403,6 @@ Summary:"""
                 except Exception as e:
                     print(f"⚠️ Ошибка Gemini API: {e}")
             
-            # Fallback: пробуем локальную LLM
-            print("🔄 Пробую локальную LLM...")
-            try:
-                response = requests.get("http://summarizer-llm:8000/", timeout=5)
-                
-                response = requests.post(
-                    "http://summarizer-llm:8000/summarize",
-                    json={"text": transcript},
-                    timeout=60  # Уменьшаем таймаут
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    summary = result.get("summary", "")
-                    if summary:
-                        print(f"✅ Сгенерирован summary через локальную LLM длиной {len(summary)} символов")
-                        return summary
-            except Exception as e:
-                print(f"⚠️ Локальная LLM недоступна: {e}")
-            
             # Финальный fallback
             print("🔄 Использую fallback summary...")
             fallback_summary = f"Краткое содержание видео (первые 300 символов транскрипта): {transcript[:300]}..."
@@ -387,7 +411,7 @@ Summary:"""
             
         except Exception as e:
             print(f"❌ Ошибка генерации summary: {e}")
-            return f"Fallback summary: {transcript[:200]}..."
+            return None
     
     def _save_video_to_db(self, video_id: str, url: str, comments_data: list, transcript: str, summary: str) -> int:
         """Сохраняет видео и комментарии в БД"""
@@ -478,26 +502,28 @@ Summary:"""
             return None
     
     def _rank_comments_mega(self, video_id: int) -> bool:
-        """Выполняет мега-ранжирование комментариев"""
+        """Мега-ранжирование комментариев с мультиключевой поддержкой"""
         try:
+            # Пробуем мультиключевую систему если доступно несколько ключей
+            try:
+                multi_ranker = MultiKeyGeminiRanker()
+                if len(multi_ranker.api_keys) > 1:
+                    print(f"🚀 Используется мультиключевая система ({len(multi_ranker.api_keys)} ключей)")
+                    return multi_ranker.rank_comments_for_video(video_id)
+            except Exception as e:
+                print(f"⚠️ Мультиключевая система недоступна: {e}")
+            
+            # Fallback к обычной системе
+            print("🔄 Переключение на обычную систему ранжирования...")
             if self.gemini_api_key:
-                print("🚀 Запускаю МЕГА-РАНЖИРОВАНИЕ с Gemini 2.0 Flash...")
-                ranker = GeminiCommentRanker(api_key=self.gemini_api_key, use_fallback=True)
+                from gemini_ranker import GeminiCommentRanker
+                ranker = GeminiCommentRanker(api_key=self.gemini_api_key)
+                return ranker.rank_comments_for_video(video_id)
             else:
-                print("⚠️ API ключ Gemini не предоставлен")
-                print("🔧 Запускаю FALLBACK ранжирование...")
-                ranker = CommentRanker(use_fallback=True)
-            
-            start_time = time.time()
-            success = ranker.rank_comments_for_video(video_id)
-            elapsed = time.time() - start_time
-            
-            if success:
-                print(f"✅ Ранжирование завершено за {elapsed:.1f} секунд")
-                return True
-            else:
-                print(f"⚠️ Ранжирование завершено с ошибками за {elapsed:.1f} секунд")
-                return False
+                print("⚠️ GEMINI_API_KEY не найден, используется fallback")
+                from comment_ranker import CommentRanker
+                ranker = CommentRanker()
+                return ranker.rank_comments_for_video(video_id)
                 
         except Exception as e:
             print(f"❌ Ошибка ранжирования: {e}")
@@ -550,6 +576,61 @@ Summary:"""
             
         except Exception as e:
             print(f"❌ Ошибка показа результатов: {e}")
+
+    def _is_transcript_valid(self, transcript: str) -> bool:
+        """Проверяет, является ли транскрипт валидным (не fallback сообщением)"""
+        fallback_messages = [
+            "Транскрипт недоступен для данного видео",
+            "Транскрипт недоступен",
+            ""
+        ]
+        return transcript and transcript.strip() not in fallback_messages and len(transcript.strip()) > 50
+
+    def _ask_user_for_manual_summary(self, video_id: str) -> str:
+        """Спрашивает пользователя, готов ли он предоставить summary вручную"""
+        print("\n" + "="*70)
+        print("⚠️ ТРАНСКРИПТ НЕДОСТУПЕН")
+        print("="*70)
+        print(f"📹 Видео ID: {video_id}")
+        print("❌ Не удалось получить транскрипт для данного видео")
+        print("🤖 Без транскрипта невозможно:")
+        print("   • Сгенерировать качественный summary")
+        print("   • Ранжировать комментарии по релевантности")
+        print("="*70)
+        
+        while True:
+            user_input = input("❓ Готовы ли вы предоставить summary видео самостоятельно? (yes/no): ").strip().lower()
+            
+            if user_input in ['yes', 'y', 'да', 'д']:
+                print("\n📝 Введите summary видео:")
+                print("💡 Рекомендации:")
+                print("   • Опишите основные темы и ключевые моменты")
+                print("   • Длина: 3-5 предложений")
+                print("   • Используйте понятный язык")
+                print("\n📝 Ваш summary (нажмите Enter дважды для завершения):")
+                
+                lines = []
+                while True:
+                    line = input()
+                    if line == "" and lines:
+                        break
+                    lines.append(line)
+                
+                manual_summary = "\n".join(lines).strip()
+                
+                if manual_summary and len(manual_summary) > 20:
+                    print(f"\n✅ Получен пользовательский summary длиной {len(manual_summary)} символов")
+                    return manual_summary
+                else:
+                    print("❌ Summary слишком короткий. Попробуйте еще раз.")
+                    continue
+                    
+            elif user_input in ['no', 'n', 'нет', 'н']:
+                print("\n❌ Обработка остановлена пользователем")
+                print("💡 Попробуйте найти видео с доступными субтитрами")
+                return None
+            else:
+                print("❌ Пожалуйста, введите 'yes' или 'no'")
 
 
 def parse_likes_count(likes_str):

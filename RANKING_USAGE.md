@@ -19,7 +19,10 @@ docker-compose exec comments-downloader python process_video.py "https://www.you
 ### 2. Ранжирование существующих комментариев
 
 ```bash
-# Если комментарии уже скачаны, можно запустить только ранжирование
+# Gemini ранжирование (рекомендуется)
+docker-compose exec comments-downloader python gemini_ranker.py VIDEO_ID --api-key=YOUR_GEMINI_KEY
+
+# Эвристическое ранжирование (fallback)
 docker-compose exec comments-downloader python comment_ranker.py VIDEO_ID
 ```
 
@@ -35,29 +38,42 @@ docker-compose exec comments-downloader python comment_ranker.py VIDEO_ID
 ### Процесс:
 1. Система получает summary видео из базы данных
 2. Для каждого комментария создается промпт с контекстом видео
-3. LLM анализирует релевантность комментария
+3. **Gemini AI** анализирует релевантность комментария (или используется эвристический алгоритм)
 4. Присваивается числовая оценка от 0.0 до 1.0
-5. Результат сохраняется в поле `rank` таблицы `comments`
+5. Результат сохраняется в поле `comment_rank` таблицы `comments`
 
 ## 🔧 Настройка
 
-### Параметры CommentRanker:
+### Параметры CommentRanker (эвристический):
 
 ```python
+# Создание экземпляра ранкера
 ranker = CommentRanker(
-    llm_service_url="http://summarizer-llm:8080",  # URL LLM сервиса
-    batch_size=5  # Размер батча для обработки
+    use_fallback=True,  # Использовать эвристику
+    batch_size=5  # Размер батча
+)
+```
+
+### Параметры GeminiCommentRanker (AI):
+
+```python
+# Создание экземпляра Gemini ранкера
+ranker = GeminiCommentRanker(
+    api_key="your_gemini_api_key",
+    batch_size=10,
+    max_retries=3
 )
 ```
 
 ### Переменные окружения:
 
 ```bash
-DB_HOST=postgres-db
+DB_HOST=db
 DB_PORT=5432
 DB_NAME=comments
 DB_USER=postgres
 DB_PASSWORD=postgres
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
 ## 📝 Примеры использования
@@ -84,9 +100,9 @@ for comment in top_comments[:10]:
 ### Ранжирование конкретного видео:
 
 ```python
-from comment_ranker import CommentRanker
+from gemini_ranker import GeminiCommentRanker
 
-ranker = CommentRanker()
+ranker = GeminiCommentRanker(api_key="your_key")
 success = ranker.rank_comments_for_video(video_id=1)
 
 if success:
@@ -95,30 +111,31 @@ if success:
 
 ## 🗃️ Структура базы данных
 
-После миграции таблица `comments` содержит новое поле:
+Таблица `comments` содержит поле для ранжирования:
 
 ```sql
-ALTER TABLE comments ADD COLUMN rank FLOAT;
+-- Поле для хранения ранга комментария
+comment_rank FLOAT
 ```
 
 ### Запросы для анализа:
 
 ```sql
 -- Топ-10 самых информативных комментариев
-SELECT author, text, rank, likes 
+SELECT author, text, comment_rank, likes 
 FROM comments 
-WHERE video_id = 1 AND rank IS NOT NULL
-ORDER BY rank DESC 
+WHERE video_id = 1 AND comment_rank IS NOT NULL
+ORDER BY comment_rank DESC 
 LIMIT 10;
 
 -- Статистика по рангам
 SELECT 
     COUNT(*) as total_comments,
-    AVG(rank) as avg_rank,
-    COUNT(CASE WHEN rank >= 0.7 THEN 1 END) as high_quality,
-    COUNT(CASE WHEN rank < 0.3 THEN 1 END) as low_quality
+    AVG(comment_rank) as avg_rank,
+    COUNT(CASE WHEN comment_rank >= 0.7 THEN 1 END) as high_quality,
+    COUNT(CASE WHEN comment_rank < 0.3 THEN 1 END) as low_quality
 FROM comments 
-WHERE video_id = 1 AND rank IS NOT NULL;
+WHERE video_id = 1 AND comment_rank IS NOT NULL;
 ```
 
 ## 🛠️ Миграция существующих данных
@@ -131,10 +148,15 @@ docker-compose exec comments-downloader python migrate_add_rank.py
 
 ## ⚡ Производительность
 
+### Gemini ранжирование:
+- **Мега-запрос**: ~10 секунд для всех комментариев
+- **Батчевая обработка**: 10-20 комментариев за раз
+- **Успешность**: 95-100%
+
+### Эвристическое ранжирование:
+- **Скорость**: ~30 секунд для 1000+ комментариев
 - **Батчевая обработка**: 5 комментариев за раз
-- **Таймаут LLM**: 30 секунд на запрос
-- **Пауза между батчами**: 1 секунда
-- **Обработка ошибок**: Автоматический retry при сбоях
+- **Успешность**: 100%
 
 ## 🔍 Мониторинг и отладка
 
@@ -142,29 +164,26 @@ docker-compose exec comments-downloader python migrate_add_rank.py
 ```bash
 # Просмотр логов ранжирования
 docker-compose logs comments-downloader
-
-# Проверка статуса LLM сервиса
-curl http://localhost:8080/health
 ```
 
 ### Проверка результатов:
 ```bash
 # Подключение к базе данных
-docker-compose exec postgres-db psql -U postgres -d comments
+docker-compose exec db psql -U postgres -d comments
 
 # Проверка проранжированных комментариев
-SELECT COUNT(*) FROM comments WHERE rank IS NOT NULL;
+SELECT COUNT(*) FROM comments WHERE comment_rank IS NOT NULL;
 ```
 
 ## 🚨 Устранение неполадок
 
-### LLM сервис недоступен:
+### Gemini API недоступен:
 ```bash
-# Перезапуск сервиса суммаризации
-docker-compose restart summarizer-llm
+# Проверка API ключа
+echo $GEMINI_API_KEY
 
-# Проверка сетевого подключения
-docker-compose exec comments-downloader ping summarizer-llm
+# Использование эвристического ранжирования
+docker-compose exec comments-downloader python comment_ranker.py VIDEO_ID
 ```
 
 ### Ошибки базы данных:

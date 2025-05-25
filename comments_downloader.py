@@ -124,36 +124,103 @@ def get_transcript(video_id):
         print(f"❌ Ошибка при получении транскрипта: {e}")
         return None
 
+def ask_user_for_manual_summary(video_id: str) -> str:
+    """Спрашивает пользователя, готов ли он предоставить summary вручную"""
+    print("\n" + "="*70)
+    print("⚠️ ТРАНСКРИПТ НЕДОСТУПЕН")
+    print("="*70)
+    print(f"📹 Видео ID: {video_id}")
+    print("❌ Не удалось получить транскрипт для данного видео")
+    print("🤖 Без транскрипта невозможно:")
+    print("   • Сгенерировать качественный summary")
+    print("   • Ранжировать комментарии по релевантности")
+    print("="*70)
+    
+    while True:
+        user_input = input("❓ Готовы ли вы предоставить summary видео самостоятельно? (yes/no): ").strip().lower()
+        
+        if user_input in ['yes', 'y', 'да', 'д']:
+            print("\n📝 Введите summary видео:")
+            print("💡 Рекомендации:")
+            print("   • Опишите основные темы и ключевые моменты")
+            print("   • Длина: 3-5 предложений")
+            print("   • Используйте понятный язык")
+            print("\n📝 Ваш summary (нажмите Enter дважды для завершения):")
+            
+            lines = []
+            while True:
+                line = input()
+                if line == "" and lines:
+                    break
+                lines.append(line)
+            
+            manual_summary = "\n".join(lines).strip()
+            
+            if manual_summary and len(manual_summary) > 20:
+                print(f"\n✅ Получен пользовательский summary длиной {len(manual_summary)} символов")
+                return manual_summary
+            else:
+                print("❌ Summary слишком короткий. Попробуйте еще раз.")
+                continue
+                
+        elif user_input in ['no', 'n', 'нет', 'н']:
+            print("\n❌ Обработка остановлена пользователем")
+            print("💡 Попробуйте найти видео с доступными субтитрами")
+            return None
+        else:
+            print("❌ Пожалуйста, введите 'yes' или 'no'")
+
 # Обновленная функция для генерации summary с помощью HTTP запроса к сервису суммаризации
 def generate_summary(text):
     if not text:
         return None
     
-    summarizer_service_url = "http://summarizer-llm:8000/summarize"
-    print(f"Отправка текста на суммаризацию по адресу: {summarizer_service_url}")
+    # Пробуем использовать Gemini API
+    try:
+        import google.generativeai as genai
+        import os
+        
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        if gemini_api_key:
+            print("🤖 Генерирую summary через Gemini API...")
+            genai.configure(api_key=gemini_api_key)
+            
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            
+            prompt = f"""
+            Создай краткое содержание видео на русском языке в 2-3 предложениях.
+            
+            Транскрипт видео:
+            {text[:4000]}  # Ограничиваем длину для API
+            
+            Краткое содержание:
+            """
+            
+            generation_config = genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=200,
+                top_p=0.8
+            )
+            
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+            
+            if response.text:
+                summary = response.text.strip()
+                print(f"✅ Сгенерирован summary через Gemini API длиной {len(summary)} символов")
+                return summary
+        else:
+            print("⚠️ GEMINI_API_KEY не найден")
+    except Exception as e:
+        print(f"⚠️ Ошибка Gemini API: {e}")
     
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = requests.post(summarizer_service_url, json={"text": text}, timeout=600)  # увеличен таймаут
-            response.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
-            summary_data = response.json()
-            summary = summary_data.get("summary")
-            if not summary:
-                print("⚠️ Сервис суммаризации вернул пустой результат.")
-                return None
-            return summary
-        except requests.exceptions.RequestException as e:
-            print(f"Попытка {attempt}/{max_retries}: Ошибка при обращении к сервису суммаризации: {e}")
-            if attempt < max_retries:
-                print("Повторная попытка через 10 секунд...")
-                time.sleep(10)
-            else:
-                print("Убедитесь, что сервис 'summarizer-llm' запущен и доступен по адресу http://summarizer-llm:8000")
-                return None
-        except Exception as e:
-            print(f"Неизвестная ошибка при генерации саммари: {e}")
-            return None
+    # Fallback: используем первые 300 символов транскрипта
+    print("🔄 Использую fallback summary...")
+    fallback_summary = f"Краткое содержание видео (первые 300 символов транскрипта): {text[:300]}..."
+    print(f"✅ Создан fallback summary длиной {len(fallback_summary)} символов")
+    return fallback_summary
 
 def parse_likes_count(likes_str):
     """Парсит количество лайков из строки YouTube"""
@@ -236,9 +303,35 @@ def main():
                 session.commit() # Сохраняем транскрипт сразу
                 print("✅ Транскрипт сохранен в базу.")
             else:
-                print("❌ Не удалось скачать транскрипт. Пропускаем генерацию summary.")
+                print("❌ Не удалось скачать транскрипт.")
+                # Спрашиваем пользователя о ручном вводе summary
+                manual_summary = ask_user_for_manual_summary(video_id)
+                if not manual_summary:
+                    print("❌ Обработка остановлена пользователем.")
+                    session.close()
+                    return  # Завершаем main() без аварии
+                
+                # Используем пользовательский summary
+                video.summary = manual_summary
+                session.commit()
+                print("✅ Пользовательский summary сохранен в базу.")
+                
+                # Сохраняем summary в файл
+                video_id_youtube = extract_video_id(video_url)
+                summary_data = {
+                    "database_video_id": video.id,
+                    "youtube_video_id": video_id_youtube,
+                    "video_title": video.title,
+                    "video_url": video_url,
+                    "summary": manual_summary,
+                    "created_at": video.upload_date
+                }
+                with open("summary.json", "w", encoding="utf-8") as f:
+                    json.dump(summary_data, f, ensure_ascii=False, indent=2)
+                    print("Пользовательский summary сохранен в summary.json")
+                
                 session.close()
-                return  # Завершаем main() без аварии
+                return
 
         # Генерируем summary, если есть транскрипт и summary еще не сгенерировано
         if transcript_text and not video.summary:
