@@ -29,17 +29,34 @@ docker-compose exec comments-downloader python comment_ranker.py VIDEO_ID
 ## 📊 Как работает ранжирование
 
 ### Критерии оценки:
-- **1.0**: Комментарий добавляет значительную ценность, дополняет содержание видео
-- **0.7-0.9**: Релевантен и содержит полезную информацию
-- **0.4-0.6**: Частично связан с темой видео
-- **0.1-0.3**: Слабо связан с содержанием
-- **0.0**: Не связан с видео (спам, оффтоп, эмоции без содержания)
+**Rating Criteria:**
+
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
+
 
 ### Процесс:
 1. Система получает summary видео из базы данных
 2. Для каждого комментария создается промпт с контекстом видео
 3. **Gemini AI** анализирует релевантность комментария (или используется эвристический алгоритм)
-4. Присваивается числовая оценка от 0.0 до 1.0
+4. Присваивается числовая оценка: либо 0.0, либо 1.0
 5. Результат сохраняется в поле `comment_rank` таблицы `comments`
 
 ## 🔧 Настройка

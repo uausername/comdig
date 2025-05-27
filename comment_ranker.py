@@ -119,11 +119,11 @@ class CommentRanker:
             rank -= 0.3
             
         # Комментарии с ключевыми словами более релевантны
-        keywords = ['рецепт', 'ингредиент', 'приготовление', 'вкус', 'температура', 'время', 'как', 'почему', 'что']
-        for keyword in keywords:
-            if keyword.lower() in comment_text.lower():
-                rank += 0.15
-                break
+        # keywords = ['рецепт', 'ингредиент', 'приготовление', 'вкус', 'температура', 'время', 'как', 'почему', 'что']
+        # for keyword in keywords:
+        #     if keyword.lower() in comment_text.lower():
+        #         rank += 0.15
+        #         break
                 
         # Добавляем немного случайности
         rank += random.uniform(-0.1, 0.1)
@@ -133,20 +133,36 @@ class CommentRanker:
     
     def _create_ranking_prompt(self, comment_text: str, video_summary: str) -> str:
         """Создает промпт для ранжирования комментария"""
-        return f"""Оцени информативность комментария относительно содержания видео по шкале от 0.0 до 1.0.
+        return f"""Rate the informativeness of ALL these comments relative to the video content on a binary scale: either 0.0 or 1.0.
 
-Содержание видео: {video_summary}
+Video content: {video_summary}
 
-Комментарий: {comment_text}
+Comment: {comment_text}
 
-Критерии оценки:
-- 1.0: Комментарий добавляет значительную ценность, дополняет или уточняет содержание видео
-- 0.7-0.9: Комментарий релевантен и содержит полезную информацию
-- 0.4-0.6: Комментарий частично связан с темой видео
-- 0.1-0.3: Комментарий слабо связан с содержанием
-- 0.0: Комментарий не связан с видео (спам, оффтоп, эмоции без содержания)
+**Rating Criteria:**
 
-Ответь только числом от 0.0 до 1.0: """
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
+
+IMPORTANT: Respond with EXACTLY ratings separated by commas, one for each comment in order.
+Example format: 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, ... """
     
     def _extract_rank_from_response(self, response: str) -> Optional[float]:
         """Извлекает числовую оценку из ответа LLM"""
