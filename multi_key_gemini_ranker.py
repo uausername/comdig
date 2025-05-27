@@ -10,7 +10,7 @@
 - Соблюдение лимитов для каждого ключа
 """
 
-import google.generativeai as genai
+# Импорт будет выполнен в методах класса
 import time
 import random
 import os
@@ -48,17 +48,22 @@ class MultiKeyGeminiRanker:
         self.batch_size = 10  # Уменьшено с 20 до 10 для получения полных ответов
         self.use_fallback = use_fallback
         
-        # Создаем отдельные модели и rate limiters для каждого ключа
-        self.models = {}
+        # Создаем отдельные клиенты и rate limiters для каждого ключа
+        self.clients = {}
         self.rate_limiters = {}
         self.key_usage_stats = {}
         
         for i, api_key in enumerate(self.api_keys, 1):
             key_name = f"key_{i}"
             
-            # Настраиваем модель для каждого ключа
-            genai.configure(api_key=api_key)
-            self.models[key_name] = genai.GenerativeModel('gemini-2.0-flash')
+            # Настраиваем клиент для каждого ключа с v1alpha API
+            from google import genai
+            from google.genai import types
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(api_version='v1alpha')
+            )
+            self.clients[key_name] = client
             
             # Создаем rate limiter для каждого ключа (используем стандартные лимиты)
             self.rate_limiters[key_name] = GeminiRateLimiter()
@@ -67,7 +72,7 @@ class MultiKeyGeminiRanker:
             self.key_usage_stats[key_name] = 0
         
         # Настройки генерации
-        self.generation_config = genai.types.GenerationConfig(
+        self.generation_config = types.GenerateContentConfig(
             temperature=0.1,
             max_output_tokens=500,  # Увеличено для получения полных ответов
             top_p=0.8,
@@ -175,6 +180,7 @@ class MultiKeyGeminiRanker:
                 if success:
                     elapsed = time.time() - start_time
                     print(f"✅ Мега-запрос завершен за {elapsed:.1f} сек")
+                    print(f"⏱️ Время ранжирования: {elapsed:.2f} секунд")
                     session.commit()
                     return True
             
@@ -185,6 +191,7 @@ class MultiKeyGeminiRanker:
             if success:
                 elapsed = time.time() - start_time
                 print(f"✅ Мультиключевое ранжирование завершено за {elapsed:.1f} сек")
+                print(f"⏱️ Время ранжирования: {elapsed:.2f} секунд")
                 print(f"📊 Статистика использования ключей:")
                 for key_name, usage in self.key_usage_stats.items():
                     print(f"   {key_name}: {usage} запросов")
@@ -214,9 +221,8 @@ class MultiKeyGeminiRanker:
             
             key_name, api_key, rate_limiter = key_info
             
-            # Настраиваем API для выбранного ключа
-            genai.configure(api_key=api_key)
-            model = self.models[key_name]
+            # Используем клиент для выбранного ключа
+            client = self.clients[key_name]
             
             # Создаем мега-промпт
             prompt = self._create_mega_ranking_prompt(comments, video_summary)
@@ -227,15 +233,20 @@ class MultiKeyGeminiRanker:
             if wait_time > 0:
                 print(f"⏳ Ожидание {wait_time:.1f} сек для ключа {key_name}")
             
-            # Отправляем запрос
-            mega_config = genai.types.GenerationConfig(
+            # Отправляем запрос с новым API
+            mega_config = types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=2000,
                 top_p=0.8,
                 top_k=40
             )
             
-            response = model.generate_content(prompt, generation_config=mega_config)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config=mega_config
+            )
+            
             rate_limiter.record_request(estimated_tokens)
             self.key_usage_stats[key_name] += 1
             
@@ -310,9 +321,8 @@ class MultiKeyGeminiRanker:
                 
                 key_name, api_key, rate_limiter = key_info
                 
-                # Настраиваем API для выбранного ключа
-                genai.configure(api_key=api_key)
-                model = self.models[key_name]
+                # Используем клиент для выбранного ключа
+                client = self.clients[key_name]
                 
                 print(f"🔑 Батч {batch_num}/{total_batches}: используется {key_name}")
                 
@@ -325,8 +335,13 @@ class MultiKeyGeminiRanker:
                 if wait_time > 0:
                     print(f"⏳ Ожидание {wait_time:.1f} сек для соблюдения лимитов {key_name}")
                 
-                # Отправляем запрос
-                response = model.generate_content(prompt, generation_config=self.generation_config)
+                # Отправляем запрос с новым API
+                response = client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt,
+                    config=self.generation_config
+                )
+                
                 rate_limiter.record_request(estimated_tokens)
                 self.key_usage_stats[key_name] += 1
                 
@@ -370,22 +385,37 @@ class MultiKeyGeminiRanker:
             comment_preview = comment.text[:500] + "..." if len(comment.text) > 500 else comment.text
             comments_text += f"{i}. {comment_preview}\n"
         
-        return f"""Rate the informativeness of ALL these comments relative to the video content on a scale from 0.0 to 1.0.
+        return f"""Rate the informativeness of ALL these comments relative to the video content on a binary scale: either 0.0 or 1.0.
 
 Video content: {video_summary}
 
 Comments ({len(comments)} total):
 {comments_text}
 
-Rating criteria:
-- 1.0: Comment adds significant value, complements or clarifies video content
-- 0.7-0.9: Comment is relevant and contains useful information  
-- 0.4-0.6: Comment is partially related to video topic
-- 0.1-0.3: Comment is weakly related to content
-- 0.0: Comment is unrelated to video (spam, off-topic, emotions without content)
+**Rating Criteria:**
+
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
 
 IMPORTANT: Respond with EXACTLY {len(comments)} ratings separated by commas, one for each comment in order.
-Example format: 0.8, 0.3, 0.9, 0.1, 0.7, 0.2, ...
+Example format: 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, ...
 
 Ratings:"""
     
@@ -396,19 +426,34 @@ Ratings:"""
             comment_preview = comment.text[:300] + "..." if len(comment.text) > 300 else comment.text
             comments_text += f"{i}. {comment_preview}\n"
         
-        return f"""Rate the informativeness of these comments relative to the video content on a scale from 0.0 to 1.0.
+        return f"""Rate the informativeness of these comments relative to the video content on a binary scale: either 0.0 or 1.0.
 
 Video content: {video_summary}
 
 Comments ({len(comments)} total):
 {comments_text}
 
-Rating criteria:
-- 1.0: Highly informative, adds significant value
-- 0.7-0.9: Relevant and useful information
-- 0.4-0.6: Partially related to video topic
-- 0.1-0.3: Weakly related to content
-- 0.0: Unrelated to video (spam, off-topic)
+
+**Rating Criteria:**
+
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
 
 Respond with EXACTLY {len(comments)} ratings separated by commas.
 Ratings:"""

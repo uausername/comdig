@@ -6,7 +6,7 @@ services:
     depends_on:
       - db
     environment:
-      - VIDEO_URL=https://www.youtube.com/watch?v=3TMWNkgbJL0
+      - VIDEO_URL=https://www.youtube.com/watch?v=rQYMTcppl98
       - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=comments

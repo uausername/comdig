@@ -3,7 +3,7 @@
 Скрипт для сброса данных видео (транскрипт и summary)
 
 # Сбросить данные для видео ID 1
-docker-compose run --rm comments-downloader python reset_video_data.py 1
+docker-compose run --rm comments-downloader python reset_video_data.py 11
 
 # Сбросить только транскрипт для видео ID 1
 docker-compose run --rm comments-downloader python reset_video_data.py 1 --transcript-only

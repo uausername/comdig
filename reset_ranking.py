@@ -3,7 +3,7 @@
 Скрипт для сброса ранжирования комментариев
 
 # Сбросить ранжирование для видео ID 1
-docker-compose run --rm comments-downloader python reset_ranking.py 1
+docker-compose run --rm comments-downloader python reset_ranking.py 11
 
 # Показать статистику
 docker-compose run --rm comments-downloader python reset_ranking.py --stats

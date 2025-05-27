@@ -177,15 +177,19 @@ def generate_summary(text):
     
     # Пробуем использовать Gemini API
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
         import os
         
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         if gemini_api_key:
             print("🤖 Генерирую summary через Gemini API...")
-            genai.configure(api_key=gemini_api_key)
             
-            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            # Создаем клиент с v1alpha API
+            client = genai.Client(
+                api_key=gemini_api_key,
+                http_options=types.HttpOptions(api_version='v1alpha')
+            )
             
             prompt = f"""
             Создай краткое содержание видео на русском языке в 2-3 предложениях.
@@ -196,15 +200,16 @@ def generate_summary(text):
             Краткое содержание:
             """
             
-            generation_config = genai.types.GenerationConfig(
+            generation_config = types.GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=200,
                 top_p=0.8
             )
             
-            response = model.generate_content(
-                prompt,
-                generation_config=generation_config
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config=generation_config
             )
             
             if response.text:

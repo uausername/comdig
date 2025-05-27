@@ -50,6 +50,9 @@ class CommentRanker:
             # Используем только эвристический алгоритм
             print("📊 Использую эвристический алгоритм ранжирования")
             
+            # Засекаем время начала ранжирования
+            ranking_start_time = time.time()
+            
             # Обрабатываем комментарии батчами
             successful_ranks = 0
             for i in range(0, len(comments), self.batch_size):
@@ -61,8 +64,11 @@ class CommentRanker:
                 time.sleep(1)
                 
             session.commit()
+            ranking_end_time = time.time()
+            ranking_duration = ranking_end_time - ranking_start_time
             print(f"✅ Ранжирование завершено для видео {video_id}")
             print(f"📊 Успешно проранжировано: {successful_ranks}/{len(comments)} комментариев")
+            print(f"⏱️ Время ранжирования: {ranking_duration:.2f} секунд")
             return True
             
         except Exception as e:

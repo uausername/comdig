@@ -4,4 +4,4 @@ requests
 sqlalchemy
 psycopg2-binary
 youtube-transcript-api
-google-generativeai
+google-genai>=1.16.1

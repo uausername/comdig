@@ -32,6 +32,7 @@ class VideoProcessor:
         self.session = get_db_session()
         self.downloader = YoutubeCommentDownloader()
         self.gemini_api_key = gemini_api_key or os.getenv('GEMINI_API_KEY')
+        self.ranking_duration = None  # Время ранжирования в секундах
         
     def _save_comments_to_json(self, video_id: int, video_url: str, youtube_video_id: str):
         """Сохраняет комментарии в JSON файл с дополнительными полями"""
@@ -157,10 +158,10 @@ class VideoProcessor:
                             
                             # Используем пользовательский summary
                             existing_video.transcript = None
-                            existing_video.summary = manual_summary
+                            existing_video.summary = self._clean_text_encoding(manual_summary)
                             print(f"\n✅ Используется пользовательский summary длиной {len(manual_summary)} символов")
                         else:
-                            existing_video.transcript = transcript
+                            existing_video.transcript = self._clean_text_encoding(transcript)
                     else:
                         transcript = existing_video.transcript
                     
@@ -169,7 +170,7 @@ class VideoProcessor:
                         print("\n🤖 ЭТАП 3: ГЕНЕРАЦИЯ SUMMARY")
                         print("-" * 40)
                         summary = self._generate_summary(existing_video.transcript)
-                        existing_video.summary = summary
+                        existing_video.summary = self._clean_text_encoding(summary)
                     
                     # Сохраняем изменения
                     self.session.commit()
@@ -178,7 +179,15 @@ class VideoProcessor:
                 # Теперь запускаем ранжирование
                 print("\n🚀 ЭТАП 5: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
                 print("-" * 40)
+                
+                # Засекаем время начала ранжирования
+                ranking_start_time = time.time()
                 ranking_success = self._rank_existing_video(existing_video.id)
+                ranking_end_time = time.time()
+                
+                # Вычисляем и выводим время ранжирования
+                self.ranking_duration = ranking_end_time - ranking_start_time
+                print(f"\n⏱️ ВРЕМЯ РАНЖИРОВАНИЯ: {self.ranking_duration:.2f} секунд")
                 
                 # Сохраняем JSON файлы после ранжирования
                 print("\n💾 ЭТАП 6: СОХРАНЕНИЕ JSON ФАЙЛОВ")
@@ -251,7 +260,15 @@ class VideoProcessor:
             next_step = 4 if not transcript else 5
             print(f"\n🚀 ЭТАП {next_step}: МЕГА-РАНЖИРОВАНИЕ КОММЕНТАРИЕВ")
             print("-" * 40)
+            
+            # Засекаем время начала ранжирования
+            ranking_start_time = time.time()
             ranking_success = self._rank_comments_mega(db_video_id)
+            ranking_end_time = time.time()
+            
+            # Вычисляем и выводим время ранжирования
+            self.ranking_duration = ranking_end_time - ranking_start_time
+            print(f"\n⏱️ ВРЕМЯ РАНЖИРОВАНИЯ: {self.ranking_duration:.2f} секунд")
 
             # Сохраняем JSON файлы после ранжирования
             next_step += 1
@@ -368,9 +385,14 @@ class VideoProcessor:
             # Если есть API ключ Gemini, используем его
             if self.gemini_api_key:
                 try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=self.gemini_api_key)
-                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    from google import genai
+                    from google.genai import types
+                    
+                    # Создаем клиент с v1alpha API
+                    client = genai.Client(
+                        api_key=self.gemini_api_key,
+                        http_options=types.HttpOptions(api_version='v1alpha')
+                    )
                     
                     # Создаем промпт для суммаризации
                     prompt = f"""Создай краткое содержание (summary) этого видео на основе транскрипта.
@@ -386,13 +408,16 @@ class VideoProcessor:
 
 Summary:"""
                     
-                    response = model.generate_content(
-                        prompt,
-                        generation_config=genai.types.GenerationConfig(
-                            temperature=0.3,
-                            max_output_tokens=200,
-                            top_p=0.8
-                        )
+                    generation_config = types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=200,
+                        top_p=0.8
+                    )
+                    
+                    response = client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=prompt,
+                        config=generation_config
                     )
                     
                     if response and response.text:
@@ -423,8 +448,8 @@ Summary:"""
                 video_id=video_id,
                 youtube_url=url,
                 title=f"Video {video_id}",  # Можно улучшить, получив реальный title
-                transcript=transcript,
-                summary=summary
+                transcript=self._clean_text_encoding(transcript) if transcript else None,
+                summary=self._clean_text_encoding(summary) if summary else None
             )
             
             self.session.add(video)
@@ -474,8 +499,8 @@ Summary:"""
                     comment = Comment(
                         comment_id=comment_id,  # Добавляем comment_id
                         video_id=video.id,
-                        author=author,
-                        text=text,
+                        author=self._clean_text_encoding(author) if author else 'Unknown',
+                        text=self._clean_text_encoding(text) if text else '',
                         likes=likes,
                         published_at=published_at
                     )
@@ -551,6 +576,10 @@ Summary:"""
             print(f"📊 Проранжировано: {ranked_comments}")
             print(f"✅ Успешность: {ranked_comments/total_comments*100:.1f}%")
             
+            # Показываем время ранжирования, если оно доступно
+            if self.ranking_duration is not None:
+                print(f"⏱️ Время ранжирования: {self.ranking_duration:.2f} секунд")
+            
             # Топ-5 комментариев
             top_comments = self.session.query(Comment).filter(
                 Comment.video_id == video_id,
@@ -586,6 +615,22 @@ Summary:"""
         ]
         return transcript and transcript.strip() not in fallback_messages and len(transcript.strip()) > 50
 
+    def _clean_text_encoding(self, text: str) -> str:
+        """Очищает текст от недопустимых символов UTF-8"""
+        if not text:
+            return text
+        
+        try:
+            # Удаляем суррогатные символы и другие проблемные символы
+            cleaned = text.encode('utf-8', errors='ignore').decode('utf-8')
+            # Дополнительная очистка от управляющих символов
+            cleaned = ''.join(char for char in cleaned if ord(char) >= 32 or char in '\n\r\t')
+            return cleaned.strip()
+        except Exception as e:
+            print(f"⚠️ Ошибка очистки текста: {e}")
+            # Fallback - удаляем все не-ASCII символы
+            return ''.join(char for char in text if ord(char) < 128).strip()
+
     def _ask_user_for_manual_summary(self, video_id: str) -> str:
         """Спрашивает пользователя, готов ли он предоставить summary вручную"""
         print("\n" + "="*70)
@@ -617,6 +662,9 @@ Summary:"""
                     lines.append(line)
                 
                 manual_summary = "\n".join(lines).strip()
+                
+                # Очищаем текст от проблемных символов
+                manual_summary = self._clean_text_encoding(manual_summary)
                 
                 if manual_summary and len(manual_summary) > 20:
                     print(f"\n✅ Получен пользовательский summary длиной {len(manual_summary)} символов")

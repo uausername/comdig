@@ -1,4 +1,4 @@
-import google.generativeai as genai
+# Импорт будет выполнен в методах класса
 import time
 import random
 import os
@@ -117,14 +117,20 @@ class GeminiCommentRanker:
     def __init__(self, api_key: str = None, use_fallback: bool = True):
         # Настройка API ключа
         if api_key:
-            genai.configure(api_key=api_key)
+            self.api_key = api_key
         elif os.getenv('GEMINI_API_KEY'):
-            genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+            self.api_key = os.getenv('GEMINI_API_KEY')
         else:
             raise ValueError("Необходимо указать GEMINI_API_KEY")
         
-        # Инициализация модели
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        # Инициализация клиента с v1alpha API
+        from google import genai
+        from google.genai import types
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(api_version='v1alpha')
+        )
+        
         self.batch_size = 20  # Gemini быстрее, можем увеличить размер батча
         self.use_fallback = use_fallback
         self.max_retries = 1
@@ -133,7 +139,7 @@ class GeminiCommentRanker:
         self.rate_limiter = GeminiRateLimiter()
         
         # Настройки генерации
-        self.generation_config = genai.types.GenerationConfig(
+        self.generation_config = types.GenerateContentConfig(
             temperature=0.1,  # Низкая температура для стабильности
             max_output_tokens=50,  # Короткий ответ
             top_p=0.8,
@@ -175,11 +181,18 @@ class GeminiCommentRanker:
             print(f"🔄 Начинаю ранжирование {len(comments)} комментариев для видео {video_id}")
             print(f"🤖 Используется: Google Gemini 2.0 Flash (контекст: ~1M токенов)")
             
+            # Засекаем время начала ранжирования
+            ranking_start_time = time.time()
+            
             # Проверяем доступность Gemini API
             gemini_available = self._check_gemini_availability()
             if not gemini_available and self.use_fallback:
                 print("⚠️ Gemini API недоступен, переключаюсь на эвристический алгоритм")
-                return self._fallback_rank_all_comments(comments, video.summary, session)
+                result = self._fallback_rank_all_comments(comments, video.summary, session)
+                ranking_end_time = time.time()
+                ranking_duration = ranking_end_time - ranking_start_time
+                print(f"⏱️ Время ранжирования: {ranking_duration:.2f} секунд")
+                return result
             elif not gemini_available:
                 print("❌ Gemini API недоступен и fallback отключен")
                 return False
@@ -189,12 +202,19 @@ class GeminiCommentRanker:
             
             if success:
                 session.commit()
+                ranking_end_time = time.time()
+                ranking_duration = ranking_end_time - ranking_start_time
                 print(f"✅ Ранжирование завершено для видео {video_id}")
+                print(f"⏱️ Время ранжирования: {ranking_duration:.2f} секунд")
                 return True
             else:
                 print("⚠️ Не удалось обработать все комментарии одним запросом, переключаюсь на батчи")
                 # Fallback к батчевой обработке
-                return self._rank_comments_in_batches(comments, video.summary, session)
+                result = self._rank_comments_in_batches(comments, video.summary, session)
+                ranking_end_time = time.time()
+                ranking_duration = ranking_end_time - ranking_start_time
+                print(f"⏱️ Время ранжирования: {ranking_duration:.2f} секунд")
+                return result
                 
         except Exception as e:
             print(f"❌ Ошибка при ранжировании комментариев: {e}")
@@ -215,10 +235,11 @@ class GeminiCommentRanker:
                 status = self.rate_limiter.get_status()
                 print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
             
-            # Простой тестовый запрос
-            response = self.model.generate_content(
-                "Ответь одним словом: тест",
-                generation_config=self.generation_config
+            # Простой тестовый запрос с новым API
+            response = self.client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents="Ответь одним словом: тест",
+                config=self.generation_config
             )
             
             # Записываем запрос
@@ -295,9 +316,10 @@ class GeminiCommentRanker:
                         status = self.rate_limiter.get_status()
                         print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                     
-                    response = self.model.generate_content(
-                        prompt,
-                        generation_config=self.generation_config
+                    response = self.client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=prompt,
+                        config=self.generation_config
                     )
                     
                     # Записываем запрос
@@ -339,9 +361,10 @@ class GeminiCommentRanker:
                     status = self.rate_limiter.get_status()
                     print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                 
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config=self.generation_config
+                response = self.client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt,
+                    config=self.generation_config
                 )
                 
                 # Записываем запрос
@@ -400,20 +423,36 @@ class GeminiCommentRanker:
     
     def _create_ranking_prompt(self, comment_text: str, video_summary: str) -> str:
         """Создает промпт для ранжирования одного комментария"""
-        return f"""Rate the informativeness of this comment relative to the video content on a scale from 0.0 to 1.0.
+        return f"""Rate the informativeness of this comment relative to the video content on a binary scale: either 0.0 or 1.0.
 
 Video content: {video_summary}
 
 Comment: {comment_text}
 
-Rating criteria:
-- 1.0: Comment adds significant value, complements or clarifies video content
-- 0.7-0.9: Comment is relevant and contains useful information
-- 0.4-0.6: Comment is partially related to video topic
-- 0.1-0.3: Comment is weakly related to content
-- 0.0: Comment is unrelated to video (spam, off-topic, emotions without content)
+**Rating Criteria:**
 
-Respond with only a number from 0.0 to 1.0:"""
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
+
+
+Respond with only a number either 0.0 or 1.0:"""
     
     def _create_batch_ranking_prompt(self, comments: List[Comment], video_summary: str) -> str:
         """Создает промпт для батчевого ранжирования"""
@@ -421,21 +460,37 @@ Respond with only a number from 0.0 to 1.0:"""
         for i, comment in enumerate(comments, 1):
             comments_text += f"{i}. {comment.text}\n"
         
-        return f"""Rate the informativeness of these comments relative to the video content on a scale from 0.0 to 1.0.
+        return f"""Rate the informativeness of these comments relative to the video content on a binary scale: either 0.0 or 1.0.
 
 Video content: {video_summary}
 
 Comments:
 {comments_text}
 
-Rating criteria:
-- 1.0: Comment adds significant value, complements or clarifies video content
-- 0.7-0.9: Comment is relevant and contains useful information
-- 0.4-0.6: Comment is partially related to video topic
-- 0.1-0.3: Comment is weakly related to content
-- 0.0: Comment is unrelated to video (spam, off-topic, emotions without content)
 
-Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
+**Rating Criteria:**
+
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
+
+Respond with only the ratings separated by commas (e.g., 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, ...):"""
     
     def _extract_rank_from_response(self, response: str) -> Optional[float]:
         """Извлекает числовую оценку из ответа Gemini"""
@@ -513,7 +568,7 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
             print(f"🔢 Оценка токенов: ~{estimated_tokens}")
             
             # Увеличиваем лимиты для большого запроса
-            mega_config = genai.types.GenerationConfig(
+            mega_config = types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=2000,  # Больше токенов для ответа
                 top_p=0.8,
@@ -532,9 +587,10 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
                         status = self.rate_limiter.get_status()
                         print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                     
-                    response = self.model.generate_content(
-                        prompt,
-                        generation_config=mega_config
+                    response = self.client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=prompt,
+                        config=mega_config
                     )
                     
                     # Записываем запрос
@@ -584,22 +640,38 @@ Respond with only the ratings separated by commas (e.g., 0.8, 0.3, 0.9, 0.1):"""
             comment_preview = comment.text[:500] + "..." if len(comment.text) > 500 else comment.text
             comments_text += f"{i}. {comment_preview}\n"
         
-        return f"""Rate the informativeness of ALL these comments relative to the video content on a scale from 0.0 to 1.0.
+        return f"""Rate the informativeness of ALL these comments relative to the video content on a binary scale: either 0.0 or 1.0.
 
 Video content: {video_summary}
 
 Comments ({len(comments)} total):
 {comments_text}
 
-Rating criteria:
-- 1.0: Comment adds significant value, complements or clarifies video content
-- 0.7-0.9: Comment is relevant and contains useful information  
-- 0.4-0.6: Comment is partially related to video topic
-- 0.1-0.3: Comment is weakly related to content
-- 0.0: Comment is unrelated to video (spam, off-topic, emotions without content)
+
+**Rating Criteria:**
+
+*   **1.0: Significant and Valuable Comment**
+    *   Assign this rating to comments that are highly informative and directly relevant to the video's topic.
+    *   These comments add significant value by:
+        *   Contributing meaningfully to the discussion.
+        *   Offering a new perspective, viewpoint, or insight on the subject.
+        *   Posing new, relevant questions that stimulate further thought or discussion.
+    *   Choose only comments that truly enhance the understanding or dialogue around the video's topic.
+
+*   **0.0: Insignificant or Unrelated Comment**
+    *   Assign this rating to comments that do *not* meet the criteria for a 1.0 rating.
+    *   This includes comments that are:
+        *   Unrelated to the video (e.g., spam, off-topic discussions).
+        *   Only weakly or partially related to the video's topic without adding substantive value.
+        *   Insignificant, such as those that:
+            *   Simply praise or criticize the author or channel without adding to the topic (e.g., "Great video!", "Love your channel!", "Didn't like it").
+            *   Only express a simple emotion without further substance of the topic (e.g., "Wow!", "Haha", "Sad", "Will watch again").
+            *   Add nothing new, insightful, or questioning to the discussion of the topic.
+    *   Essentially, ignore comments that are trivial or do not contribute to the topic at hand.
+
 
 IMPORTANT: Respond with EXACTLY {len(comments)} ratings separated by commas, one for each comment in order.
-Example format: 0.8, 0.3, 0.9, 0.1, 0.7, 0.2, ...
+Example format: 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, ...
 
 Ratings:"""
     
