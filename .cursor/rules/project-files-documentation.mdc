@@ -1,5 +1,83 @@
 ---
-description:
-globs:
-alwaysApply: false
+description: 
+globs: 
+alwaysApply: true
 ---
+# Project Files Documentation Rule
+
+## Purpose
+This rule ensures that the PROJECT_FILES_DOCUMENTATION.md file is automatically updated whenever files are added, modified, or removed from the project.
+
+## When to Apply
+- When creating new Python files (.py)
+- When modifying existing Python files with new functions/classes
+- When adding new documentation files (.md)
+- When adding new configuration files (docker-compose.yml, dockerfile, requirements.txt)
+- When adding new utility scripts
+- When archiving files to the archive/ folder
+- When updating project structure
+
+## What to Update in PROJECT_FILES_DOCUMENTATION.md
+
+### For New Files:
+1. Add file description with line count
+2. Document the file's purpose and main functionality
+3. List all classes and their key methods
+4. List all standalone functions
+5. Document imports and dependencies
+6. Note any special configurations or settings
+7. Update the project statistics section
+
+### For Modified Files:
+1. Update line counts
+2. Add new functions/methods to the documentation
+3. Update descriptions if functionality changed
+4. Update import lists if dependencies changed
+
+### For Archived Files:
+1. Move file description to the archive section
+2. Update main project statistics
+3. Note the reason for archiving
+
+### For Deleted Files:
+1. Remove from documentation
+2. Update project statistics
+3. Note in changelog if significant
+
+## Documentation Format
+Follow the existing structure:
+- File name with line count
+- Purpose/description
+- Main classes and methods
+- Key features and configurations
+- Usage examples where relevant
+- Dependencies and imports
+
+## Statistics to Maintain
+- Total file count
+- Lines of code
+- Number of Python files
+- Number of documentation files
+- Number of classes and methods
+- Project size estimates
+
+## Example Entry Format
+```markdown
+### X. `filename.py` (XXX lines)
+**Purpose**: Brief description of what this file does
+
+**Main Class**: `ClassName`
+
+**Key Methods**:
+- `method_name()` - description
+- `another_method()` - description
+
+**Features**:
+- Feature 1
+- Feature 2
+
+**Dependencies**: list of imports
+```
+
+Always update the "Last updated" date and version information at the top of the document.
+

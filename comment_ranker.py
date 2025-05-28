@@ -35,6 +35,13 @@ class CommentRanker:
                 print(f"❌ У видео {video_id} нет summary для ранжирования")
                 return False
                 
+            # Проверяем наличие комментариев вообще
+            total_comments = session.query(Comment).filter_by(video_id=video_id).count()
+            
+            if total_comments == 0:
+                print(f"ℹ️ У видео {video_id} нет комментариев для ранжирования")
+                return True
+            
             # Получаем комментарии без ранга
             comments = session.query(Comment).filter_by(
                 video_id=video_id, 

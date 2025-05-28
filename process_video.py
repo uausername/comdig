@@ -133,13 +133,85 @@ class VideoProcessor:
                 has_transcript = existing_video.transcript is not None
                 has_summary = existing_video.summary is not None
                 
+                # Проверяем наличие комментариев
+                total_comments = self.session.query(Comment).filter_by(video_id=existing_video.id).count()
+                has_comments = total_comments > 0
+                
                 print(f"📊 Статус данных:")
                 print(f"   Транскрипт: {'✅' if has_transcript else '❌'}")
                 print(f"   Summary: {'✅' if has_summary else '❌'}")
+                print(f"   Комментарии: {'✅' if has_comments else '❌'} ({total_comments} шт.)")
                 
                 # Если данных нет, обрабатываем как новое видео
-                if not has_transcript or not has_summary:
+                if not has_transcript or not has_summary or not has_comments:
                     print("🔄 Недостающие данные - запускаю полную обработку...")
+                    
+                    # Загружаем комментарии если их нет
+                    if not has_comments:
+                        print("\n📥 ЭТАП 1: ЗАГРУЗКА КОММЕНТАРИЕВ")
+                        print("-" * 40)
+                        comments_data = self._download_comments(video_id)
+                        if not comments_data:
+                            print("❌ Не удалось загрузить комментарии")
+                            return False
+                        
+                        # Сохраняем комментарии в БД
+                        print("💬 Сохраняю новые комментарии...")
+                        saved_count = 0
+                        skipped_count = 0
+                        
+                        for comment_data in comments_data:
+                            try:
+                                # Обрабатываем разные форматы данных комментариев
+                                if isinstance(comment_data, dict):
+                                    comment_id = comment_data.get('cid')
+                                    author = comment_data.get('author', 'Unknown')
+                                    text = comment_data.get('text', '')
+                                    likes = parse_likes_count(comment_data.get('votes', 0))
+                                    published_at = None
+                                    if comment_data.get('time'):
+                                        try:
+                                            if comment_data.get('time_parsed'):
+                                                from datetime import datetime
+                                                published_at = datetime.fromtimestamp(comment_data['time_parsed'])
+                                        except:
+                                            pass
+                                else:
+                                    comment_id = getattr(comment_data, 'cid', None)
+                                    author = getattr(comment_data, 'author', 'Unknown')
+                                    text = getattr(comment_data, 'text', '')
+                                    likes = parse_likes_count(getattr(comment_data, 'votes', 0))
+                                    published_at = None
+                                
+                                # Проверяем, существует ли уже комментарий с таким comment_id
+                                if comment_id:
+                                    existing_comment = self.session.query(Comment).filter_by(comment_id=comment_id).first()
+                                    if existing_comment:
+                                        skipped_count += 1
+                                        continue
+                                
+                                comment = Comment(
+                                    comment_id=comment_id,
+                                    video_id=existing_video.id,
+                                    author=self._clean_text_encoding(author) if author else 'Unknown',
+                                    text=self._clean_text_encoding(text) if text else '',
+                                    likes=likes,
+                                    published_at=published_at
+                                )
+                                self.session.add(comment)
+                                saved_count += 1
+                                
+                            except Exception as e:
+                                print(f"⚠️ Ошибка обработки комментария: {e}")
+                                skipped_count += 1
+                                continue
+                        
+                        print(f"✅ Сохранено новых комментариев: {saved_count}")
+                        if skipped_count > 0:
+                            print(f"⏭️ Пропущено дубликатов/ошибок: {skipped_count}")
+                        
+                        self.session.commit()
+                        print("✅ Комментарии сохранены в БД")
                     
                     # Получаем транскрипт если его нет
                     if not has_transcript:
@@ -410,12 +482,12 @@ Summary:"""
                     
                     generation_config = types.GenerateContentConfig(
                         temperature=0.3,
-                        max_output_tokens=200,
+                        max_output_tokens=5000,  # Увеличено для Gemini 2.5 (было 200, 1000, 2000 недостаточно)
                         top_p=0.8
                     )
                     
                     response = client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-2.5-flash-preview-05-20',
                         contents=prompt,
                         config=generation_config
                     )
@@ -424,6 +496,12 @@ Summary:"""
                         summary = response.text.strip()
                         print(f"✅ Сгенерирован summary через Gemini длиной {len(summary)} символов")
                         return summary
+                    elif response and hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        if candidate.content and candidate.content.parts and candidate.content.parts[0].text:
+                            summary = candidate.content.parts[0].text.strip()
+                            print(f"✅ Сгенерирован summary через Gemini длиной {len(summary)} символов")
+                            return summary
                     
                 except Exception as e:
                     print(f"⚠️ Ошибка Gemini API: {e}")
@@ -574,7 +652,10 @@ Summary:"""
             
             print(f"💬 Всего комментариев: {total_comments}")
             print(f"📊 Проранжировано: {ranked_comments}")
-            print(f"✅ Успешность: {ranked_comments/total_comments*100:.1f}%")
+            if total_comments > 0:
+                print(f"✅ Успешность: {ranked_comments/total_comments*100:.1f}%")
+            else:
+                print(f"ℹ️ Нет комментариев для ранжирования")
             
             # Показываем время ранжирования, если оно доступно
             if self.ranking_duration is not None:

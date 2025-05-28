@@ -74,7 +74,7 @@ class MultiKeyGeminiRanker:
         # Настройки генерации
         self.generation_config = types.GenerateContentConfig(
             temperature=0.1,
-            max_output_tokens=500,  # Увеличено для получения полных ответов
+            max_output_tokens=4000,  # Увеличено для батчевого ранжирования (было 2000)
             top_p=0.8,
             top_k=40
         )
@@ -156,6 +156,13 @@ class MultiKeyGeminiRanker:
                 print(f"❌ У видео {video_id} нет summary для ранжирования")
                 return False
                 
+            # Проверяем наличие комментариев вообще
+            total_comments = session.query(Comment).filter_by(video_id=video_id).count()
+            
+            if total_comments == 0:
+                print(f"ℹ️ У видео {video_id} нет комментариев для ранжирования")
+                return True
+            
             # Получаем комментарии без ранга
             comments = session.query(Comment).filter_by(
                 video_id=video_id, 
@@ -234,15 +241,16 @@ class MultiKeyGeminiRanker:
                 print(f"⏳ Ожидание {wait_time:.1f} сек для ключа {key_name}")
             
             # Отправляем запрос с новым API
+            from google.genai import types
             mega_config = types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=2000,
+                max_output_tokens=5000,  # Увеличено для мега-запросов (было 2000)
                 top_p=0.8,
                 top_k=40
             )
             
             response = client.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash-preview-05-20',
                 contents=prompt,
                 config=mega_config
             )
@@ -250,14 +258,47 @@ class MultiKeyGeminiRanker:
             rate_limiter.record_request(estimated_tokens)
             self.key_usage_stats[key_name] += 1
             
-            if response and response.text:
-                ranks = self._extract_mega_ranks_from_response(response.text, len(comments))
-                if ranks and len(ranks) == len(comments):
-                    # Применяем ранги
-                    for comment, rank in zip(comments, ranks):
-                        comment.comment_rank = rank
-                    print(f"✅ Мега-запрос успешен с ключом {key_name}")
-                    return True
+            # Улучшенная обработка ответа мега-запроса
+            if response:
+                # Проверяем прямой доступ к тексту
+                if hasattr(response, 'text') and response.text:
+                    ranks = self._extract_mega_ranks_from_response(response.text, len(comments))
+                    if ranks and len(ranks) == len(comments):
+                        # Применяем ранги
+                        for comment, rank in zip(comments, ranks):
+                            comment.comment_rank = rank
+                        print(f"✅ Мега-запрос успешен с ключом {key_name}")
+                        return True
+                    else:
+                        print(f"⚠️ Не удалось извлечь ранги из мега-ответа")
+                        print(f"   Ответ: '{response.text[:200]}...'")
+                
+                # Проверяем кандидатов
+                elif hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    print(f"📋 Мега-запрос finish reason: {candidate.finish_reason}")
+                    
+                    if candidate.content and candidate.content.parts and candidate.content.parts[0].text:
+                        text = candidate.content.parts[0].text
+                        ranks = self._extract_mega_ranks_from_response(text, len(comments))
+                        if ranks and len(ranks) == len(comments):
+                            # Применяем ранги
+                            for comment, rank in zip(comments, ranks):
+                                comment.comment_rank = rank
+                            print(f"✅ Мега-запрос успешен с ключом {key_name}")
+                            return True
+                        else:
+                            print(f"⚠️ Не удалось извлечь ранги из мега-кандидата")
+                            print(f"   Ответ: '{text[:200]}...'")
+                    else:
+                        print(f"⚠️ Пустой контент в мега-кандидате")
+                        if candidate.finish_reason == 'MAX_TOKENS':
+                            print("💡 Причина: Достигнут лимит токенов, увеличьте max_output_tokens")
+                else:
+                    print(f"⚠️ Пустой мега-ответ")
+                    print(f"   Тип ответа: {type(response)}")
+            else:
+                print(f"⚠️ Нет мега-ответа")
             
             return False
             
@@ -337,7 +378,7 @@ class MultiKeyGeminiRanker:
                 
                 # Отправляем запрос с новым API
                 response = client.models.generate_content(
-                    model='gemini-2.0-flash',
+                    model='gemini-2.5-flash-preview-05-20',
                     contents=prompt,
                     config=self.generation_config
                 )
@@ -345,18 +386,47 @@ class MultiKeyGeminiRanker:
                 rate_limiter.record_request(estimated_tokens)
                 self.key_usage_stats[key_name] += 1
                 
-                if response and response.text:
-                    ranks = self._extract_batch_ranks_from_response(response.text, len(batch))
-                    if ranks and len(ranks) == len(batch):
-                        # Применяем ранги к комментариям
-                        for comment, rank in zip(batch, ranks):
-                            comment.comment_rank = rank
-                        print(f"✅ Батч {batch_num} успешно обработан с {key_name}")
-                        return True
+                # Улучшенная обработка ответа
+                if response:
+                    # Проверяем прямой доступ к тексту
+                    if hasattr(response, 'text') and response.text:
+                        ranks = self._extract_batch_ranks_from_response(response.text, len(batch))
+                        if ranks and len(ranks) == len(batch):
+                            # Применяем ранги к комментариям
+                            for comment, rank in zip(batch, ranks):
+                                comment.comment_rank = rank
+                            print(f"✅ Батч {batch_num} успешно обработан с {key_name}")
+                            return True
+                        else:
+                            print(f"⚠️ Не удалось извлечь ранги из ответа {key_name}")
+                            print(f"   Ответ: '{response.text[:200]}...'")
+                    
+                    # Проверяем кандидатов
+                    elif hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        print(f"📋 Finish reason: {candidate.finish_reason}")
+                        
+                        if candidate.content and candidate.content.parts and candidate.content.parts[0].text:
+                            text = candidate.content.parts[0].text
+                            ranks = self._extract_batch_ranks_from_response(text, len(batch))
+                            if ranks and len(ranks) == len(batch):
+                                # Применяем ранги к комментариям
+                                for comment, rank in zip(batch, ranks):
+                                    comment.comment_rank = rank
+                                print(f"✅ Батч {batch_num} успешно обработан с {key_name}")
+                                return True
+                            else:
+                                print(f"⚠️ Не удалось извлечь ранги из кандидата {key_name}")
+                                print(f"   Ответ: '{text[:200]}...'")
+                        else:
+                            print(f"⚠️ Пустой контент в кандидате от {key_name}")
+                            if candidate.finish_reason == 'MAX_TOKENS':
+                                print("💡 Причина: Достигнут лимит токенов, увеличьте max_output_tokens")
                     else:
-                        print(f"⚠️ Не удалось извлечь ранги из ответа {key_name}")
+                        print(f"⚠️ Пустой ответ от {key_name}")
+                        print(f"   Тип ответа: {type(response)}")
                 else:
-                    print(f"⚠️ Пустой ответ от {key_name}")
+                    print(f"⚠️ Нет ответа от {key_name}")
                 
             except Exception as e:
                 error_msg = str(e)

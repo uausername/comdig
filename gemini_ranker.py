@@ -11,10 +11,10 @@ class GeminiRateLimiter:
     """Система управления лимитами запросов для Gemini API"""
     
     def __init__(self):
-        # Лимиты для бесплатного тарифа Gemini 2.0 Flash
-        self.rpm_limit = 30  # запросов в минуту
-        self.tpm_limit = 1000000  # токенов в минуту
-        self.rpd_limit = 1500  # запросов в день
+        # Лимиты для Gemini 2.5 Flash Preview 05-20
+        self.rpm_limit = 10  # запросов в минуту
+        self.tpm_limit = 250000  # токенов в минуту
+        self.rpd_limit = 500  # запросов в день
         
         # Трекинг запросов
         self.requests_minute = []  # список временных меток запросов за последнюю минуту
@@ -126,6 +126,8 @@ class GeminiCommentRanker:
         # Инициализация клиента с v1alpha API
         from google import genai
         from google.genai import types
+        self.genai = genai
+        self.types = types
         self.client = genai.Client(
             api_key=self.api_key,
             http_options=types.HttpOptions(api_version='v1alpha')
@@ -141,7 +143,7 @@ class GeminiCommentRanker:
         # Настройки генерации
         self.generation_config = types.GenerateContentConfig(
             temperature=0.1,  # Низкая температура для стабильности
-            max_output_tokens=50,  # Короткий ответ
+            max_output_tokens=1000,  # Увеличено для Gemini 2.5 (было 100)
             top_p=0.8,
             top_k=40
         )
@@ -168,6 +170,13 @@ class GeminiCommentRanker:
                 print(f"❌ У видео {video_id} нет summary для ранжирования")
                 return False
                 
+            # Проверяем наличие комментариев вообще
+            total_comments = session.query(Comment).filter_by(video_id=video_id).count()
+            
+            if total_comments == 0:
+                print(f"ℹ️ У видео {video_id} нет комментариев для ранжирования")
+                return True
+            
             # Получаем комментарии без ранга
             comments = session.query(Comment).filter_by(
                 video_id=video_id, 
@@ -179,7 +188,7 @@ class GeminiCommentRanker:
                 return True
                 
             print(f"🔄 Начинаю ранжирование {len(comments)} комментариев для видео {video_id}")
-            print(f"🤖 Используется: Google Gemini 2.0 Flash (контекст: ~1M токенов)")
+            print(f"🤖 Используется: Google Gemini 2.5 Flash Preview 05-20 (контекст: ~1M токенов)")
             
             # Засекаем время начала ранжирования
             ranking_start_time = time.time()
@@ -236,10 +245,14 @@ class GeminiCommentRanker:
                 print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
             
             # Простой тестовый запрос с новым API
+            test_config = self.types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=500  # Увеличено для тестов (было 100)
+            )
             response = self.client.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash-preview-05-20',
                 contents="Ответь одним словом: тест",
-                config=self.generation_config
+                config=test_config
             )
             
             # Записываем запрос
@@ -317,7 +330,7 @@ class GeminiCommentRanker:
                         print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                     
                     response = self.client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-2.5-flash-preview-05-20',
                         contents=prompt,
                         config=self.generation_config
                     )
@@ -362,7 +375,7 @@ class GeminiCommentRanker:
                     print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                 
                 response = self.client.models.generate_content(
-                    model='gemini-2.0-flash',
+                    model='gemini-2.5-flash-preview-05-20',
                     contents=prompt,
                     config=self.generation_config
                 )
@@ -570,7 +583,7 @@ Respond with only the ratings separated by commas (e.g., 0.0, 1.0, 0.0, 0.0, 0.0
             # Увеличиваем лимиты для большого запроса
             mega_config = types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=2000,  # Больше токенов для ответа
+                max_output_tokens=5000,  # Увеличено для мега-запросов (было 2000)
                 top_p=0.8,
                 top_k=40
             )
@@ -588,7 +601,7 @@ Respond with only the ratings separated by commas (e.g., 0.0, 1.0, 0.0, 0.0, 0.0
                         print(f"📊 Лимиты: {status['rpm_used']}/{status['rpm_limit']} RPM, {status['tpm_used']}/{status['tpm_limit']} TPM")
                     
                     response = self.client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-2.5-flash-preview-05-20',
                         contents=prompt,
                         config=mega_config
                     )
